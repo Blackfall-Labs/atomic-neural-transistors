@@ -38,4 +38,9 @@ impl GateTRM {
         let gate_params = self.gate.weight().elem_count();
         self.trm.param_count() + gate_params
     }
+
+    /// Alias for param_count (for compatibility)
+    pub fn params(&self) -> usize {
+        self.param_count()
+    }
 }

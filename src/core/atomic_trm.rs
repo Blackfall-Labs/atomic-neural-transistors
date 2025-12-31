@@ -66,6 +66,11 @@ impl AtomicTRM {
         self.cfg.param_count()
     }
 
+    /// Alias for param_count (for compatibility)
+    pub fn params(&self) -> usize {
+        self.param_count()
+    }
+
     /// Get the configuration
     pub fn config(&self) -> &AtomicConfig {
         &self.cfg

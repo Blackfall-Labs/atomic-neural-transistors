@@ -67,4 +67,9 @@ impl ClassifierTRM {
     pub fn param_count(&self) -> usize {
         self.encoder.param_count() + self.head.weight().elem_count() + self.n_classes
     }
+
+    /// Alias for param_count (for compatibility)
+    pub fn params(&self) -> usize {
+        self.param_count()
+    }
 }

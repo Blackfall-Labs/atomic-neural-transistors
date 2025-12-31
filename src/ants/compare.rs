@@ -30,4 +30,9 @@ impl CompareTRM {
     pub fn param_count(&self) -> usize {
         self.0.param_count()
     }
+
+    /// Alias for param_count (for compatibility)
+    pub fn params(&self) -> usize {
+        self.param_count()
+    }
 }
