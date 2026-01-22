@@ -78,6 +78,30 @@ impl Region {
     pub fn size(&self) -> usize {
         self.positions.len()
     }
+
+    /// Convert region to a grid with background fill
+    /// Returns a grid sized to the bounding box with the region's value at each position
+    pub fn as_grid(&self, background: u32) -> Vec<Vec<u32>> {
+        if self.positions.is_empty() {
+            return vec![];
+        }
+
+        let (min_r, min_c, max_r, max_c) = self.bounding_box();
+        let h = max_r - min_r + 1;
+        let w = max_c - min_c + 1;
+
+        // Fill with background
+        let mut grid = vec![vec![background; w]; h];
+
+        // Place region cells
+        for &(r, c) in &self.positions {
+            let local_r = r - min_r;
+            let local_c = c - min_c;
+            grid[local_r][local_c] = self.value;
+        }
+
+        grid
+    }
 }
 
 /// Find connected component using flood-fill
