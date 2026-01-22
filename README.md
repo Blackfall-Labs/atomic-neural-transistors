@@ -12,37 +12,30 @@
 ANTs are the **transistors of neural computing** - atomic units that perform single operations with high precision and compose into larger systems.
 
 Just as silicon transistors:
+
 - Do one thing (switch on/off)
 - Compose into gates, then circuits, then CPUs
 - Are fast and predictable
 
 ANTs:
+
 - Do one thing (compare, classify, diff, etc.)
 - Compose into meshes, then bridges, then cognitive systems
 - Run in microseconds with deterministic behavior
 
-## Key Numbers
-
-| Metric | ANT | GPT-2 Small | Improvement |
-|--------|-----|-------------|-------------|
-| **Parameters** | 1-5K | 117M | **23,000x smaller** |
-| **Inference** | <1ms | 50-200ms | **50-200x faster** |
-| **Training** | 30-90 sec | Days/weeks | **Minutes** |
-| **Memory** | <1 MB | 500+ MB | **500x less** |
-
 ## Pretrained Models
 
-| ANT | Accuracy | Size | Purpose |
-|-----|----------|------|---------|
-| `are_equal` | 99.5% | 812 KB | Compare two embeddings |
-| `is_empty` | 100% | 209 KB | Detect zero embeddings |
-| `contains` | ~97% | 1.8 MB | Query in sequence |
-| `has_duplicate` | 100% | 1.8 MB | Duplicate detection |
+| ANT             | Accuracy | Size   | Purpose                |
+| --------------- | -------- | ------ | ---------------------- |
+| `are_equal`     | 99.5%    | 812 KB | Compare two embeddings |
+| `is_empty`      | 100%     | 209 KB | Detect zero embeddings |
+| `contains`      | ~97%     | 1.8 MB | Query in sequence      |
+| `has_duplicate` | 100%     | 1.8 MB | Duplicate detection    |
 
 ## Quick Start
 
 ```rust
-use atomic_neural_transistors::{AtomicTRM, AtomicConfig};
+use atomic_neural_transistors::{AtomicNeuralTransistor, AtomicConfig};
 use candle_core::{Device, DType};
 use candle_nn::{VarBuilder, VarMap};
 
@@ -51,7 +44,7 @@ let device = Device::Cpu;
 let varmap = VarMap::new();
 let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
 
-let ant = AtomicTRM::new(&AtomicConfig::tiny(32, 1), vb)?;
+let ant = AtomicNeuralTransistor::new(&AtomicConfig::tiny(32, 1), vb)?;
 println!("Parameters: {}", ant.param_count()); // ~1.5K
 ```
 
@@ -77,13 +70,13 @@ assert!(has_duplicate(&checker, &[1, 2, 3, 2, 5]));
 atomic-neural-transistors/
 ├── src/
 │   ├── config/          # AtomicConfig
-│   ├── core/            # AtomicTRM (the fundamental ANT)
+│   ├── core/            # AtomicNeuralTransistor (the fundamental ANT)
 │   ├── ants/            # Specialized ANTs
-│   │   ├── compare.rs   # CompareTRM
-│   │   ├── diff.rs      # DiffTRM
-│   │   ├── merge.rs     # MergeTRM
-│   │   ├── gate.rs      # GateTRM
-│   │   └── classifier.rs# ClassifierTRM
+│   │   ├── compare.rs   # CompareANT
+│   │   ├── diff.rs      # DiffANT
+│   │   ├── merge.rs     # MergeANT
+│   │   ├── gate.rs      # GateANT
+│   │   └── classifier.rs# ClassifierANT
 │   ├── composition/     # Composition algebra
 │   │   ├── sequence.rs  # contains, has_duplicate, etc.
 │   │   └── grid.rs      # Grid operations
@@ -93,13 +86,13 @@ atomic-neural-transistors/
 
 ## Specialized ANTs
 
-| ANT | Purpose | Params |
-|-----|---------|--------|
-| `CompareTRM` | Binary similarity | ~1.5K |
-| `DiffTRM` | Difference embedding | ~3K |
-| `MergeTRM` | Combine signals | ~3K |
-| `GateTRM` | Attention routing | ~2K |
-| `ClassifierTRM` | Multi-class | ~5-10K |
+| ANT             | Purpose              | Params |
+| --------------- | -------------------- | ------ |
+| `CompareANT`    | Binary similarity    | ~1.5K  |
+| `DiffANT`       | Difference embedding | ~3K    |
+| `MergeANT`      | Combine signals      | ~3K    |
+| `GateANT`       | Attention routing    | ~2K    |
+| `ClassifierANT` | Multi-class          | ~5-10K |
 
 ## Examples
 
@@ -127,6 +120,7 @@ Unlike end-to-end training where errors compound, ANT composition maintains comp
 ### 3. Edge Deployment
 
 ANTs run on:
+
 - Embedded systems
 - Mobile devices
 - Browsers (via WASM)

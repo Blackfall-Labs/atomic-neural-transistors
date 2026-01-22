@@ -1,34 +1,24 @@
 [package]
 name = "atomic-neural-transistors"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Ultra-small (<5K param) composable neural primitives for real-time AI"
+description = "Ultra-small (<5K param) composable ternary neural primitives for CPU-only AI"
 repository = "https://github.com/blackfall-labs/atomic-neural-transistors"
-keywords = ["machine-learning", "neural-network", "tiny-ml", "edge-ai"]
+keywords = ["ternary", "neural-network", "tiny-ml", "edge-ai", "cpu"]
 categories = ["science", "algorithms"]
 
 [dependencies]
-candle-core = "0.8"
-candle-nn = "0.8"
-safetensors = "0.4"
-thiserror = "1.0"
+# TernarySignal foundation - TensorISA, thermograms, adaptive learning
+ternsig = "0.2"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
 
 [dev-dependencies]
-anyhow = "1.0"
+tempfile = "3.0"
 
 [features]
 default = []
-cuda = ["candle-core/cuda", "candle-nn/cuda"]
-
-[[example]]
-name = "basic_usage"
-path = "examples/basic_usage.rs"
-
-[[example]]
-name = "composition"
-path = "examples/composition.rs"
-
-[[example]]
-name = "sudoku_check"
-path = "examples/sudoku_check.rs"
+# NO CUDA. CPU only. Ternary weights. Integer arithmetic.

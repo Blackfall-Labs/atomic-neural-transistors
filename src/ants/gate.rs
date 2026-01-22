@@ -1,46 +1,49 @@
-//! GateTRM - Attention-based signal routing
+//! GateANT - Load gate.tisa.asm, apply learned gating
 
-use candle_core::{Module, Result, Tensor, D};
-use candle_nn::{linear, Linear, VarBuilder};
+use crate::core::AtomicNeuralTransistor;
+use crate::error::Result;
+use std::path::Path;
+use ternsig::TernarySignal;
 
-use crate::config::AtomicConfig;
-use crate::core::AtomicTRM;
+const GATE_TISA: &str = include_str!("../../tisa/gate.tisa.asm");
 
-/// Gates a signal based on a control input
-///
-/// Used for conditional computation and attention-like routing
-pub struct GateTRM {
-    trm: AtomicTRM,
-    gate: Linear,
+pub struct GateANT(AtomicNeuralTransistor);
+
+impl GateANT {
+    pub fn new() -> Result<Self> {
+        Ok(Self(AtomicNeuralTransistor::from_source(GATE_TISA)?))
+    }
+
+    pub fn from_file(path: &Path) -> Result<Self> {
+        Ok(Self(AtomicNeuralTransistor::from_file(path)?))
+    }
+
+    /// Gate signal based on control
+    pub fn gate(&mut self, signal: &[TernarySignal], control: &[TernarySignal]) -> Result<Vec<TernarySignal>> {
+        let mut input = Vec::with_capacity(signal.len() + control.len());
+        input.extend_from_slice(signal);
+        input.extend_from_slice(control);
+        self.0.forward(&input)
+    }
 }
 
-impl GateTRM {
-    /// Create a new GateTRM for given embedding dimension
-    pub fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        Ok(Self {
-            trm: AtomicTRM::new(&AtomicConfig::tiny(dim * 2, dim), vb.pp("t"))?,
-            gate: linear(dim, dim, vb.pp("g"))?,
-        })
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gate_loads() {
+        let gate = GateANT::new();
+        assert!(gate.is_ok());
     }
 
-    /// Gate a signal based on control
-    ///
-    /// - `signal`: the signal to potentially pass through
-    /// - `control`: determines how much of signal passes
-    pub fn gate(&self, signal: &Tensor, control: &Tensor) -> Result<Tensor> {
-        let g = candle_nn::ops::sigmoid(&self.gate.forward(control)?)?;
-        let combined = Tensor::cat(&[signal, control], D::Minus1)?;
-        self.trm.forward(&combined)?.mul(&g)
-    }
-
-    /// Get parameter count
-    pub fn param_count(&self) -> usize {
-        let gate_params = self.gate.weight().elem_count();
-        self.trm.param_count() + gate_params
-    }
-
-    /// Alias for param_count (for compatibility)
-    pub fn params(&self) -> usize {
-        self.param_count()
+    #[test]
+    fn test_gate() {
+        let mut gate = GateANT::new().unwrap();
+        let signal: Vec<TernarySignal> = (0..32).map(|i| TernarySignal::positive(i as u8)).collect();
+        let control: Vec<TernarySignal> = (0..32).map(|_| TernarySignal::positive(128)).collect();
+        let result = gate.gate(&signal, &control);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 32);
     }
 }

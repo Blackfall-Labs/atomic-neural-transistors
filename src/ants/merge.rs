@@ -1,41 +1,51 @@
-//! MergeTRM - Combine multiple signals into one
+//! MergeANT - Load merge.tisa.asm, combine signals
 
-use candle_core::{Result, Tensor, D};
-use candle_nn::VarBuilder;
+use crate::core::AtomicNeuralTransistor;
+use crate::error::Result;
+use std::path::Path;
+use ternsig::TernarySignal;
 
-use crate::config::AtomicConfig;
-use crate::core::AtomicTRM;
+const MERGE_TISA: &str = include_str!("../../tisa/merge.tisa.asm");
 
-/// Merges multiple input signals into a single embedding
-///
-/// Learns optimal combination rather than simple average
-pub struct MergeTRM(AtomicTRM);
+pub struct MergeANT(AtomicNeuralTransistor);
 
-impl MergeTRM {
-    /// Create a new MergeTRM
-    ///
-    /// - `dim`: embedding dimension for each input
-    /// - `n`: number of inputs to merge
-    pub fn new(dim: usize, n: usize, vb: VarBuilder) -> Result<Self> {
-        Ok(Self(AtomicTRM::new(
-            &AtomicConfig::small(dim * n, dim),
-            vb,
-        )?))
+impl MergeANT {
+    pub fn new() -> Result<Self> {
+        Ok(Self(AtomicNeuralTransistor::from_source(MERGE_TISA)?))
+    }
+
+    pub fn from_file(path: &Path) -> Result<Self> {
+        Ok(Self(AtomicNeuralTransistor::from_file(path)?))
     }
 
     /// Merge multiple signals into one
-    pub fn merge(&self, signals: &[Tensor]) -> Result<Tensor> {
-        let combined = Tensor::cat(signals, D::Minus1)?;
-        self.0.forward(&combined)
+    pub fn merge(&mut self, signals: &[&[TernarySignal]]) -> Result<Vec<TernarySignal>> {
+        let total: usize = signals.iter().map(|s| s.len()).sum();
+        let mut input = Vec::with_capacity(total);
+        for sig in signals {
+            input.extend_from_slice(sig);
+        }
+        self.0.forward(&input)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_merge_loads() {
+        let merge = MergeANT::new();
+        assert!(merge.is_ok());
     }
 
-    /// Get parameter count
-    pub fn param_count(&self) -> usize {
-        self.0.param_count()
-    }
-
-    /// Alias for param_count (for compatibility)
-    pub fn params(&self) -> usize {
-        self.param_count()
+    #[test]
+    fn test_merge() {
+        let mut merge = MergeANT::new().unwrap();
+        let sig1: Vec<TernarySignal> = (0..32).map(|i| TernarySignal::positive(i as u8)).collect();
+        let sig2: Vec<TernarySignal> = (0..32).map(|i| TernarySignal::negative(i as u8)).collect();
+        let result = merge.merge(&[&sig1, &sig2]);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 32);
     }
 }

@@ -1,38 +1,53 @@
-//! CompareTRM - Binary similarity comparison
+//! CompareANT - Load compare.tisa.asm, compare two vectors
 
-use candle_core::{Result, Tensor, D};
-use candle_nn::VarBuilder;
+use crate::core::AtomicNeuralTransistor;
+use crate::error::Result;
+use std::path::Path;
+use ternsig::TernarySignal;
 
-use crate::config::AtomicConfig;
-use crate::core::AtomicTRM;
+const COMPARE_TISA: &str = include_str!("../../tisa/compare.tisa.asm");
 
-/// Compares two embeddings and returns similarity score
-///
-/// Output: [0, 1] probability that inputs are equal/similar
-pub struct CompareTRM(AtomicTRM);
+pub struct CompareANT(AtomicNeuralTransistor);
 
-impl CompareTRM {
-    /// Create a new CompareTRM for given embedding dimension
-    pub fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        Ok(Self(AtomicTRM::new(
-            &AtomicConfig::tiny(dim * 2, 1),
-            vb,
-        )?))
+impl CompareANT {
+    pub fn new() -> Result<Self> {
+        Ok(Self(AtomicNeuralTransistor::from_source(COMPARE_TISA)?))
     }
 
-    /// Compare two tensors, returns similarity in [0, 1]
-    pub fn compare(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
-        let combined = Tensor::cat(&[a, b], D::Minus1)?;
-        candle_nn::ops::sigmoid(&self.0.forward(&combined)?)
+    pub fn from_file(path: &Path) -> Result<Self> {
+        Ok(Self(AtomicNeuralTransistor::from_file(path)?))
     }
 
-    /// Get parameter count
-    pub fn param_count(&self) -> usize {
-        self.0.param_count()
+    /// Compare two vectors - concatenate then forward
+    pub fn compare(&mut self, a: &[TernarySignal], b: &[TernarySignal]) -> Result<TernarySignal> {
+        let mut input = Vec::with_capacity(a.len() + b.len());
+        input.extend_from_slice(a);
+        input.extend_from_slice(b);
+        let output = self.0.forward(&input)?;
+        Ok(output.into_iter().next().unwrap_or(TernarySignal::zero()))
     }
 
-    /// Alias for param_count (for compatibility)
-    pub fn params(&self) -> usize {
-        self.param_count()
+    pub fn are_similar(&mut self, a: &[TernarySignal], b: &[TernarySignal]) -> Result<bool> {
+        Ok(self.compare(a, b)?.is_positive())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compare_loads() {
+        let cmp = CompareANT::new();
+        assert!(cmp.is_ok());
+    }
+
+    #[test]
+    fn test_compare() {
+        let mut cmp = CompareANT::new().unwrap();
+        let a: Vec<TernarySignal> = (0..32).map(|i| TernarySignal::positive(i as u8)).collect();
+        let b: Vec<TernarySignal> = (0..32).map(|i| TernarySignal::positive(i as u8)).collect();
+        let result = cmp.compare(&a, &b);
+        assert!(result.is_ok());
     }
 }

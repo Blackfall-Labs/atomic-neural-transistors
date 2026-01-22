@@ -1,5 +1,5 @@
 //! Core ANT implementation
 
-mod atomic_trm;
+mod atomic_neural_transistor;
 
-pub use atomic_trm::AtomicTRM;
+pub use atomic_neural_transistor::AtomicNeuralTransistor;
