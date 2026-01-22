@@ -1,6 +1,6 @@
 [package]
 name = "atomic-neural-transistors"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Ultra-small (<5K param) composable ternary neural primitives for CPU-only AI"
@@ -10,7 +10,7 @@ categories = ["science", "algorithms"]
 
 [dependencies]
 # TernarySignal foundation - TensorISA, thermograms, adaptive learning
-ternsig = "0.2"
+ternsig = "0.4"
 
 # Error handling
 thiserror = "2.0"
