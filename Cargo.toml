@@ -9,8 +9,8 @@ keywords = ["ternary", "neural-network", "tiny-ml", "edge-ai", "cpu"]
 categories = ["science", "algorithms"]
 
 [dependencies]
-# TernarySignal foundation - TensorISA, thermograms, adaptive learning
-ternsig = "0.4"
+# Signal foundation - Signal VM, thermograms, adaptive learning
+ternsig = { path = "../ternsig" }
 
 # Error handling
 thiserror = "2.0"

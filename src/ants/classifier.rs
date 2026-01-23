@@ -1,18 +1,18 @@
-//! ClassifierANT - Load classifier.tisa.asm, run argmax
+//! ClassifierANT - Load classifier.ternsig, run argmax
 
 use crate::core::AtomicNeuralTransistor;
 use crate::error::Result;
 use std::path::Path;
-use ternsig::TernarySignal;
+use ternsig::Signal;
 
-const CLASSIFIER_TISA: &str = include_str!("../../tisa/classifier.tisa.asm");
+const CLASSIFIER_PROGRAM: &str = include_str!("../../ternsig/classifier.ternsig");
 
 pub struct ClassifierANT(AtomicNeuralTransistor);
 
 impl ClassifierANT {
     /// Load default classifier
     pub fn new() -> Result<Self> {
-        Ok(Self(AtomicNeuralTransistor::from_source(CLASSIFIER_TISA)?))
+        Ok(Self(AtomicNeuralTransistor::from_source(CLASSIFIER_PROGRAM)?))
     }
 
     /// Load from file
@@ -21,12 +21,12 @@ impl ClassifierANT {
     }
 
     /// Classify - returns class logits
-    pub fn classify(&mut self, input: &[TernarySignal]) -> Result<Vec<TernarySignal>> {
+    pub fn classify(&mut self, input: &[Signal]) -> Result<Vec<Signal>> {
         self.0.forward(input)
     }
 
     /// Predict - returns argmax class index
-    pub fn predict(&mut self, input: &[TernarySignal]) -> Result<usize> {
+    pub fn predict(&mut self, input: &[Signal]) -> Result<usize> {
         let output = self.classify(input)?;
         Ok(output
             .iter()
@@ -53,8 +53,8 @@ mod tests {
     #[test]
     fn test_classify() {
         let mut classifier = ClassifierANT::new().unwrap();
-        let input: Vec<TernarySignal> = (0..classifier.input_dim())
-            .map(|i| TernarySignal::positive((i * 8) as u8))
+        let input: Vec<Signal> = (0..classifier.input_dim())
+            .map(|i| Signal::positive((i * 8) as u8))
             .collect();
         let output = classifier.classify(&input);
         assert!(output.is_ok());
@@ -64,8 +64,8 @@ mod tests {
     #[test]
     fn test_predict() {
         let mut classifier = ClassifierANT::new().unwrap();
-        let input: Vec<TernarySignal> = (0..classifier.input_dim())
-            .map(|_| TernarySignal::positive(128))
+        let input: Vec<Signal> = (0..classifier.input_dim())
+            .map(|_| Signal::positive(128))
             .collect();
         let prediction = classifier.predict(&input);
         assert!(prediction.is_ok());

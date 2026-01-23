@@ -1,12 +1,12 @@
 //! # Atomic Neural Transistors
 //!
-//! Load and execute .tisa.asm files. Dimensions from file, not config.
+//! Load and execute .ternsig files. Dimensions from file, not config.
 //! Learning via mastery approach. No floats in neural computation.
 //!
 //! ## Core Usage
 //!
 //! ```rust,ignore
-//! use atomic_neural_transistors::{ClassifierANT, TernarySignal};
+//! use atomic_neural_transistors::{ClassifierANT, Signal};
 //!
 //! let mut classifier = ClassifierANT::new()?;
 //! let output = classifier.classify(&input)?;
@@ -32,4 +32,4 @@ pub mod error;
 pub use core::AtomicNeuralTransistor;
 pub use error::{AntError, Result};
 pub use ants::{ClassifierANT, CompareANT, DiffANT, GateANT, MergeANT};
-pub use ternsig::TernarySignal;
+pub use ternsig::Signal;

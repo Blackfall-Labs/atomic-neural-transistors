@@ -1,4 +1,4 @@
-//! AtomicNeuralTransistor - Load and execute .tisa.asm files
+//! AtomicNeuralTransistor - Load and execute .ternsig files
 //!
 //! Dimensions come from the file. No runtime config.
 //! Learning uses mastery approach. No floats.
@@ -6,26 +6,26 @@
 use crate::error::{AntError, Result};
 use std::path::Path;
 use ternsig::{
-    tensor_isa::{assemble, AssembledProgram, TensorInterpreter},
-    TernarySignal,
+    vm::{assemble, AssembledProgram, Interpreter},
+    Signal,
 };
 
-/// Atomic Neural Transistor - loads and executes a .tisa.asm file
+/// Atomic Neural Transistor - loads and executes a .ternsig file
 pub struct AtomicNeuralTransistor {
-    interpreter: TensorInterpreter,
+    interpreter: Interpreter,
     input_dim: usize,
     output_dim: usize,
 }
 
 impl AtomicNeuralTransistor {
-    /// Load from .tisa.asm file path
+    /// Load from .ternsig file path
     pub fn from_file(path: &Path) -> Result<Self> {
         let source = std::fs::read_to_string(path)
             .map_err(|e| AntError::Io(e.to_string()))?;
         Self::from_source(&source)
     }
 
-    /// Load from .tisa.asm source string
+    /// Load from .ternsig source string
     pub fn from_source(source: &str) -> Result<Self> {
         let program = assemble(source)
             .map_err(|e| AntError::Assembly(e.to_string()))?;
@@ -36,7 +36,7 @@ impl AtomicNeuralTransistor {
     pub fn from_program(program: &AssembledProgram) -> Result<Self> {
         let input_dim = program.input_shape.iter().product();
         let output_dim = program.output_shape.iter().product();
-        let interpreter = TensorInterpreter::from_program(program);
+        let interpreter = Interpreter::from_program(program);
 
         Ok(Self {
             interpreter,
@@ -45,8 +45,8 @@ impl AtomicNeuralTransistor {
         })
     }
 
-    /// Forward pass - TernarySignal in, TernarySignal out
-    pub fn forward(&mut self, input: &[TernarySignal]) -> Result<Vec<TernarySignal>> {
+    /// Forward pass - Signal in, Signal out
+    pub fn forward(&mut self, input: &[Signal]) -> Result<Vec<Signal>> {
         if input.len() != self.input_dim {
             return Err(AntError::ShapeMismatch {
                 expected: self.input_dim.to_string(),
@@ -84,12 +84,12 @@ impl AtomicNeuralTransistor {
     }
 
     /// Access interpreter for learning/thermogram operations
-    pub fn interpreter_mut(&mut self) -> &mut TensorInterpreter {
+    pub fn interpreter_mut(&mut self) -> &mut Interpreter {
         &mut self.interpreter
     }
 
     /// Access interpreter (read-only)
-    pub fn interpreter(&self) -> &TensorInterpreter {
+    pub fn interpreter(&self) -> &Interpreter {
         &self.interpreter
     }
 }
@@ -98,7 +98,7 @@ impl AtomicNeuralTransistor {
 mod tests {
     use super::*;
 
-    const TEST_TISA: &str = r#"
+    const TEST_TERNSIG: &str = r#"
 .registers
     H0: i32[4]
     H1: i32[4]
@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn test_from_source() {
-        let ant = AtomicNeuralTransistor::from_source(TEST_TISA);
+        let ant = AtomicNeuralTransistor::from_source(TEST_TERNSIG);
         assert!(ant.is_ok());
         let ant = ant.unwrap();
         assert_eq!(ant.input_dim(), 4);
@@ -120,13 +120,13 @@ mod tests {
     }
 
     #[test]
-    fn test_forward_ternary() {
-        let mut ant = AtomicNeuralTransistor::from_source(TEST_TISA).unwrap();
+    fn test_forward_signal() {
+        let mut ant = AtomicNeuralTransistor::from_source(TEST_TERNSIG).unwrap();
         let input = vec![
-            TernarySignal::positive(100),
-            TernarySignal::negative(50),
-            TernarySignal::positive(200),
-            TernarySignal::zero(),
+            Signal::positive(100),
+            Signal::negative(50),
+            Signal::positive(200),
+            Signal::ZERO,
         ];
         let output = ant.forward(&input);
         assert!(output.is_ok());
@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn test_forward_i32() {
-        let mut ant = AtomicNeuralTransistor::from_source(TEST_TISA).unwrap();
+        let mut ant = AtomicNeuralTransistor::from_source(TEST_TERNSIG).unwrap();
         let input = vec![100, -50, 200, 0];
         let output = ant.forward_i32(&input);
         assert!(output.is_ok());
@@ -155,8 +155,8 @@ mod tests {
 
     #[test]
     fn test_shape_mismatch() {
-        let mut ant = AtomicNeuralTransistor::from_source(TEST_TISA).unwrap();
-        let input = vec![TernarySignal::zero(); 2]; // wrong size
+        let mut ant = AtomicNeuralTransistor::from_source(TEST_TERNSIG).unwrap();
+        let input = vec![Signal::ZERO; 2]; // wrong size
         let result = ant.forward(&input);
         assert!(result.is_err());
     }
