@@ -1,0 +1,25 @@
+rune "sensor_anomaly" do
+  version 1
+end
+use :ant_ml
+
+# ANT 1: Magnitude profiler — per-dim absolute value
+def magnitude_forward(input) do
+  abs(input)
+end
+
+# ANT 2: Delta detector — element-wise difference from previous tick
+def delta_forward(input, previous) do
+  sub(input, previous)
+end
+
+# ANT 3: Frequency analyzer — even/odd pair correlation + magnitude diff
+# First half: (even[k] * odd[k]) >> 8  (cross-correlation)
+# Second half: even[k] - odd[k]  (pair diff)
+def frequency_forward(input) do
+  evens = stride_slice(input, 0, 2)
+  odds = stride_slice(input, 1, 2)
+  pairs = shift(mul(evens, odds), 8)
+  diffs = sub(evens, odds)
+  concat(pairs, diffs)
+end

@@ -4,6 +4,7 @@
 //! Ternary pressure transitions gated by participation and neuromodulation.
 
 use crate::core::weight_matrix::{packed_from_current, WeightMatrix};
+use crate::neuromod::NeuromodState;
 use ternary_signal::PackedSignal;
 
 /// Configuration for mastery learning.
@@ -69,19 +70,48 @@ impl MasteryState {
         output: &[PackedSignal],
         target: &[PackedSignal],
     ) {
+        self.update_gated(weights, input, output, target, None);
+    }
+
+    /// Run one mastery learning step with optional neuromodulator gating.
+    ///
+    /// When `neuromod` is provided:
+    /// - Plasticity gate: no learning if DA is below gate threshold
+    /// - Participation breadth: NE controls activity threshold divisor
+    ///   (high NE = broader participation, low NE = narrower)
+    pub fn update_gated(
+        &mut self,
+        weights: &mut WeightMatrix,
+        input: &[PackedSignal],
+        output: &[PackedSignal],
+        target: &[PackedSignal],
+        neuromod: Option<&NeuromodState>,
+    ) {
         assert_eq!(input.len(), weights.cols);
         assert_eq!(output.len(), weights.rows);
         assert_eq!(target.len(), weights.rows);
 
+        // DA gate: no learning if dopamine is below threshold
+        if let Some(nm) = neuromod {
+            if !nm.plasticity_open() {
+                return;
+            }
+        }
+
         self.steps += 1;
 
-        // Compute activity threshold: top 25% of input activations participate
+        // Compute activity threshold based on neuromodulator state
         let max_input = input.iter()
             .map(|s| s.current().unsigned_abs())
             .max()
             .unwrap_or(1)
             .max(1);
-        let activity_threshold = max_input / 4;
+
+        // NE controls participation divisor (default 4 = top 25%)
+        let divisor = neuromod
+            .map(|nm| nm.participation_divisor())
+            .unwrap_or(4);
+        let activity_threshold = max_input / divisor;
 
         for i in 0..weights.rows {
             let error = target[i].current() as i64 - output[i].current() as i64;
@@ -106,14 +136,12 @@ impl MasteryState {
                     continue;
                 }
 
-                // Activity-weighted pressure: only top 25% contribute
+                // Activity-weighted pressure: only active inputs contribute
                 if input_abs <= activity_threshold {
                     continue;
                 }
 
                 // Scale pressure by activity strength (production used ×15 scale)
-                // activity_strength = (activity - threshold) / max_activity
-                // We approximate in integer: (input_abs - threshold) * 15 / max_input
                 let activity_strength = ((input_abs - activity_threshold) as i64 * 15
                     / max_input as i64)
                     .max(1) as i32;
@@ -132,17 +160,31 @@ impl MasteryState {
                 }
             }
         }
-
     }
 
     /// Apply pressure decay to all weights.
     /// Call once per training cycle (epoch), not per sample.
     pub fn decay(&mut self) {
+        self.decay_gated(None);
+    }
+
+    /// Apply pressure decay with optional neuromodulator gating.
+    ///
+    /// When `neuromod` is provided, 5HT controls decay rate:
+    /// - High 5HT (255) → 2× decay (harder to accumulate pressure)
+    /// - Neutral 5HT (128) → 1× decay (default behavior)
+    /// - Low 5HT (0) → 0× decay (pressure accumulates freely)
+    pub fn decay_gated(&mut self, neuromod: Option<&NeuromodState>) {
+        let multiplier = neuromod
+            .map(|nm| nm.decay_multiplier())
+            .unwrap_or(1);
+        let effective_decay = self.config.decay_rate * multiplier;
+
         for p in self.pressure.iter_mut() {
             if *p > 0 {
-                *p = (*p - self.config.decay_rate).max(0);
+                *p = (*p - effective_decay).max(0);
             } else if *p < 0 {
-                *p = (*p + self.config.decay_rate).min(0);
+                *p = (*p + effective_decay).min(0);
             }
         }
     }

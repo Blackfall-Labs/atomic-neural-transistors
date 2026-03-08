@@ -142,6 +142,14 @@ impl AtomicNeuralTransistor {
         }
     }
 
+    /// Execute a named function with arbitrary `Value` arguments.
+    ///
+    /// Use this when you need to pass handles, integers, or mixed types
+    /// (not just a single PackedSignal array).
+    pub fn call_values(&mut self, func_name: &str, args: Vec<Value>) -> Result<Value> {
+        self.eval_call(func_name, args)
+    }
+
     /// Execute the .rune script's `forward` function with the given input.
     pub fn forward(&mut self, input: &[PackedSignal]) -> Result<Vec<PackedSignal>> {
         self.call("forward", input)
@@ -158,12 +166,11 @@ impl AtomicNeuralTransistor {
 
     /// Evaluate the full .rune source, then call a named function.
     fn eval_call(&mut self, func_name: &str, args: Vec<Value>) -> Result<Value> {
-        // Build script that defines everything, then calls the function
-        let call_args = if args.len() == 1 {
-            "___input___".to_string()
-        } else {
-            (0..args.len()).map(|i| format!("___arg{i}___")).collect::<Vec<_>>().join(", ")
-        };
+        // Build argument variable names and call expression
+        let call_args = (0..args.len())
+            .map(|i| format!("___arg{i}___"))
+            .collect::<Vec<_>>()
+            .join(", ");
 
         let tokens = Lexer::new(&self.source).tokenize()
             .map_err(|e| AntError::Runes(format!("lex: {e:?}")))?;
@@ -177,13 +184,13 @@ impl AtomicNeuralTransistor {
         evaluator.eval_with_engine(&program, &self.engine)
             .map_err(|e| AntError::Runes(format!("eval: {e}")))?;
 
-        // Set up input variable and call forward
+        // Set up argument variables
         for (i, arg) in args.into_iter().enumerate() {
             if i == 0 {
-                evaluator.define_variable("___input___", arg);
-            } else {
-                evaluator.define_variable(&format!("___arg{i}___"), arg);
+                // Backward compat: `call()` uses ___input___ for the first arg
+                evaluator.define_variable("___input___", arg.clone());
             }
+            evaluator.define_variable(&format!("___arg{i}___"), arg);
         }
 
         // Build and evaluate the call expression

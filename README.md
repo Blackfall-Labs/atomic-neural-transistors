@@ -31,13 +31,55 @@ ANTs:
 
 | ANT | Purpose | Params | Forward Latency |
 |-----|---------|--------|-----------------|
-| `CompareANT` | Binary similarity detection | 1,296 | 63 µs |
+| `CompareANT` | Binary similarity detection | 1,296 | 64 µs |
 | `DiffANT` | Change detection | 2,304 | 49 µs |
-| `MergeANT` | Signal fusion | 2,304 | 51 µs |
-| `GateANT` | Signal gating (sigmoid) | 1,536 | 74 µs |
-| `ClassifierANT` | Multi-class classification | 2,016 | 184 µs |
+| `MergeANT` | Signal fusion | 2,304 | 49 µs |
+| `GateANT` | Signal gating (sigmoid) | 1,536 | 80 µs |
+| `ClassifierANT` | Multi-class classification | 2,016 | 194 µs |
 
 Total across all 5 ANTs: **9,456 parameters**. Each parameter is a `PackedSignal` (1 byte).
+
+---
+
+## Multiplex Encoding
+
+Multiple ANTs process the same input in parallel, with learned salience routing, prediction-error surprise detection, and neuromodulator-gated learning.
+
+```
+input → [ANT_α, ANT_β, ANT_γ] → Salience Router → output
+                                        ↓
+                                 Prediction Engine
+                                   (EMA tracker)
+                                        ↓
+                                surprise > threshold?
+                                   ↓           ↓
+                                  YES          NO
+                              Learning       (skip)
+                              Moment
+                           ↙         ↘
+                     positive      negative
+                     (reinforce)   (anti-pattern)
+                     DA +20        DA -10
+```
+
+| Component | Latency | Purpose |
+|-----------|---------|---------|
+| `MultiplexEncoder` (3 ANTs) | 5.0 µs | Full process cycle |
+| `SalienceRouter` (3×32) | 622 ns | Gate-based fusion |
+| `PredictionEngine` (32-dim) | 85 ns | EMA + surprise detection |
+| `NeuromodState` (full cycle) | 10 ns | DA/NE/5HT gating |
+
+### Neuromodulator Gating
+
+Three chemicals gate plasticity (integer-only, 0-255 each):
+
+| Chemical | Role | Effect on Learning |
+|----------|------|--------------------|
+| **Dopamine** | Reward signal | DA > gate (77) required for any learning |
+| **Norepinephrine** | Arousal | Controls participation breadth (narrow ↔ broad) |
+| **Serotonin** | Stability | Controls pressure decay rate (faster ↔ slower) |
+
+DA ↔ 5HT antagonism prevents saturation. All chemicals decay toward baseline (128) each tick.
 
 ---
 
@@ -58,6 +100,7 @@ Key mechanisms:
 - **Weaken-before-flip**: Magnitude depletes to zero before polarity can change
 - **Representable level stepping**: Transitions jump to the next discrete level, not by arbitrary amounts
 - **Pressure threshold gating**: Sustained evidence required before any synaptic change
+- **Neuromodulator gating**: Optional DA/NE/5HT modulation of plasticity
 
 See [MASTERY.md](MASTERY.md) for the full algorithm.
 
@@ -99,22 +142,20 @@ let b: Vec<PackedSignal> = (0..32).map(|i| PackedSignal::pack(1, i * 8, 1)).coll
 let similar = compare.compare(&a, &b)?; // PackedSignal: positive = similar
 ```
 
-### Mastery training from scratch
+### Multiplex encoding with surprise-gated learning
 
 ```rust
-use atomic_neural_transistors::core::weight_matrix::{packed_from_current, WeightMatrix};
-use atomic_neural_transistors::learning::{MasteryConfig, MasteryState};
-use atomic_neural_transistors::PackedSignal;
+use atomic_neural_transistors::{MultiplexEncoder, AntSlot, PackedSignal};
 
-let config = MasteryConfig { pressure_threshold: 3, decay_rate: 1, participation_gate: 5 };
-let mut weights = WeightMatrix::zeros(1, 32);
-let mut mastery = MasteryState::new(32, config);
+let mut mux = MultiplexEncoder::new(32, 3, 40); // 32-dim output, EMA shift 3, threshold 40
+mux.add_slot(AntSlot::with_passthrough("compare", compare_fn));
+mux.add_slot(AntSlot::with_passthrough("classify", classify_fn));
+mux.finalize();
 
-// Train: provide input features, clamped output, and target
-mastery.update(&mut weights, &features, &[clamped_output], &[target]);
-
-// Decay pressure once per cycle (not per sample)
-mastery.decay();
+let result = mux.process(&input, Some(&target));
+// result.surprise.is_surprising  — prediction error exceeded threshold
+// result.learning_occurred        — mastery update was triggered
+// result.dopamine                 — current DA level (gates future learning)
 ```
 
 ---
@@ -158,15 +199,15 @@ let loaded = Thermogram::load(&path)?;
 ```
 
 Thermogram I/O benchmarks:
-- **Save** (all 5 ANTs, 9,456 params): 4.1 ms
-- **Load** (all 5 ANTs): 102 µs
+- **Save** (all 5 ANTs, 9,456 params): 4.9 ms
+- **Load** (all 5 ANTs): 105 µs
 - File sizes: 454 bytes – 2.9 KB per trained ANT
 
 ---
 
 ## Examples
 
-10 reproducible examples demonstrate mastery learning, composition, and persistence:
+13 reproducible examples demonstrate mastery learning, composition, multiplex encoding, and real-world anomaly detection:
 
 ```bash
 # Mastery training (all converge in 1-2 cycles)
@@ -181,11 +222,16 @@ cargo run --example composition_has_duplicate   # 100% on 500 sequences
 cargo run --example composition_contains        # 100% on 500 queries
 cargo run --example composition_sudoku          # 100% on 200 4x4 grids
 
-# Multi-ANT pipeline
+# Multi-ANT pipelines
 cargo run --example pipeline_planning    # 100% success — classifier + comparer
-
-# Persistence lifecycle
 cargo run --example persistence_lifecycle  # train → save → destroy → load → verify
+
+# Multiplex encoding with surprise-gated learning
+cargo run --example multiplex_classify   # 3 ANTs, salience routing, DA dynamics
+cargo run --example adaptive_cascade     # specialization + shift adaptation + cascade verification
+
+# Real-world use case
+cargo run --example sensor_anomaly       # 87% detection, 12% FP, 4-type classification, adaptation
 ```
 
 ---
@@ -195,14 +241,25 @@ cargo run --example persistence_lifecycle  # train → save → destroy → load
 Run with `cargo bench`:
 
 ```
-classifier_forward       184 µs
-compare_forward           63 µs
-diff_forward              49 µs
-gate_forward              74 µs
-merge_forward             51 µs
-mastery_update_step       47 µs
-thermogram/save        4.1 ms  (all 5 ANTs)
-thermogram/load        102 µs  (all 5 ANTs)
+ANT Forward Passes:
+  classifier_forward         194 µs
+  compare_forward             64 µs
+  diff_forward                49 µs
+  gate_forward                80 µs
+  merge_forward               49 µs
+
+Multiplex System:
+  multiplex/3_ant_process    5.0 µs    (3 ANTs + routing + prediction + learning)
+  salience_route_3x32        622 ns    (gate-based fusion, 3 sources × 32 dim)
+  prediction_observe_32dim    85 ns    (EMA update + surprise detection)
+  neuromod/full_cycle         10 ns    (inject DA/NE/5HT + gate check + tick)
+
+Learning:
+  mastery_update_step         51 µs    (one mastery step via Runes)
+
+Persistence:
+  thermogram/save           4.9 ms    (all 5 ANTs, 9,456 params)
+  thermogram/load           105 µs    (all 5 ANTs)
 ```
 
 Example wall times (release, including data generation + training + evaluation):
@@ -217,6 +274,9 @@ Example wall times (release, including data generation + training + evaluation):
 | Sudoku (14,400 comparisons) | 352 ms |
 | Planning pipeline | 363 ms |
 | Persistence lifecycle | 363 ms |
+| Multiplex classify | 36 ms |
+| Adaptive cascade | 33 ms |
+| Sensor anomaly (600 ticks) | 31 ms |
 
 Binary sizes: 177–523 KB per example (release build).
 
@@ -237,8 +297,12 @@ atomic-neural-transistors/
 │   │   ├── gate.rs         # GateANT — sigmoid gating
 │   │   └── classifier.rs   # ClassifierANT — multi-class
 │   ├── learning.rs         # MasteryState, MasteryConfig, pressure engine
+│   ├── neuromod.rs         # NeuromodState — DA/NE/5HT chemical gating
+│   ├── prediction.rs       # PredictionEngine — EMA + surprise detection
+│   ├── salience.rs         # SalienceRouter — gate-based multi-ANT fusion
+│   ├── multiplex.rs        # MultiplexEncoder — parallel ANTs + routing + learning
 │   ├── modules/
-│   │   └── ant_ml.rs       # Runes verb implementations (matmul, relu, etc.)
+│   │   └── ant_ml.rs       # Runes verb implementations (matmul, relu, neuromod, etc.)
 │   ├── composition/        # Composition algebra (contains, has_duplicate, grid)
 │   └── weights_init.rs     # Self-initialization from Thermogram
 ├── runes/                  # Runes scripts defining ANT computation
@@ -247,10 +311,11 @@ atomic-neural-transistors/
 │   ├── diff.rune
 │   ├── gate.rune
 │   └── merge.rune
-├── examples/               # 10 reproducible mastery + composition examples
+├── examples/               # 12 reproducible examples
 ├── benches/                # Criterion benchmarks
 ├── trained/                # Thermogram files (persisted synaptic strengths)
 ├── MASTERY.md              # Full mastery learning algorithm documentation
+├── CROSS_ANT_ROUTING.md    # Research notes on inter-ANT routing patterns
 └── REAL_WORLD_USES.md      # Production deployment history
 ```
 

@@ -24,8 +24,15 @@ use thermogram::{Delta, Signal, Thermogram};
 use crate::core::weight_matrix::{WeightMatrix, packed_from_current};
 use crate::learning::{MasteryConfig, MasteryState};
 
+use crate::neuromod::{Chemical, NeuromodState};
+use crate::prediction::PredictionEngine;
+use crate::salience::SalienceRouter;
+
 // Handle type IDs
 const HANDLE_WEIGHT_MATRIX: u32 = 1;
+const HANDLE_NEUROMOD: u32 = 2;
+const HANDLE_PREDICTOR: u32 = 3;
+const HANDLE_SALIENCE: u32 = 4;
 
 /// Runtime state shared between the ANT host and the Runes engine.
 pub struct AntRuntime {
@@ -37,6 +44,12 @@ pub struct AntRuntime {
     thermogram: Option<Thermogram>,
     /// Map from semantic key to handle ID (for load_synaptic deduplication).
     synaptic_keys: HashMap<String, u64>,
+    /// Neuromodulator states keyed by handle ID.
+    neuromods: HashMap<u64, NeuromodState>,
+    /// Prediction engines keyed by handle ID.
+    predictors: HashMap<u64, PredictionEngine>,
+    /// Salience routers keyed by handle ID.
+    salience: HashMap<u64, SalienceRouter>,
     /// Next handle ID.
     next_handle: u64,
     /// Base path for resolving relative weight file paths.
@@ -48,6 +61,9 @@ impl Default for AntRuntime {
         Self {
             weights: HashMap::new(),
             mastery: HashMap::new(),
+            neuromods: HashMap::new(),
+            predictors: HashMap::new(),
+            salience: HashMap::new(),
             thermogram: None,
             synaptic_keys: HashMap::new(),
             next_handle: 0,
@@ -173,6 +189,26 @@ impl AntMlModule {
                 Box::new(LoadSynapticVerb),
                 Box::new(SaveSynapticVerb),
                 Box::new(PersistThermoVerb),
+                Box::new(NeuromodNewVerb),
+                Box::new(NeuromodInjectVerb),
+                Box::new(NeuromodTickVerb),
+                Box::new(NeuromodGateVerb),
+                Box::new(PredictNewVerb),
+                Box::new(PredictObserveVerb),
+                // Utility verbs
+                Box::new(SubVerb),
+                Box::new(AbsVerb),
+                Box::new(NegateVerb),
+                Box::new(ConcatVerb),
+                Box::new(SumVerb),
+                // Salience routing verbs
+                Box::new(SalienceNewVerb),
+                Box::new(SalienceRouteVerb),
+                Box::new(SalienceTrainVerb),
+                // Neuromod inspection
+                Box::new(NeuromodReadVerb),
+                // Stride verb
+                Box::new(StrideSliceVerb),
             ],
         }
     }
@@ -729,6 +765,149 @@ impl Verb for SaveSynapticVerb {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Neuromodulator verbs
+// ---------------------------------------------------------------------------
+
+/// neuromod_new() → Handle
+/// Create a neutral neuromodulator state (all chemicals at baseline 128).
+struct NeuromodNewVerb;
+impl Verb for NeuromodNewVerb {
+    fn name(&self) -> &str { "neuromod_new" }
+    fn call(&self, _args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        with_runtime(ctx, |rt| {
+            let id = rt.alloc_handle();
+            rt.neuromods.insert(id, NeuromodState::new());
+            Ok(Value::Handle(runes_core::value::HandleType(HANDLE_NEUROMOD), id))
+        })
+    }
+}
+
+/// neuromod_inject(handle, chemical_str, amount) → Nil
+/// Inject a signed chemical delta. chemical_str: "da", "ne", or "5ht".
+struct NeuromodInjectVerb;
+impl Verb for NeuromodInjectVerb {
+    fn name(&self) -> &str { "neuromod_inject" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let handle = require_handle(args, 0, "neuromod_inject", HANDLE_NEUROMOD, span)?;
+        let chem_str = require_str(args, 1, "neuromod_inject", span)?;
+        let amount = require_int(args, 2, "neuromod_inject", span)? as i8;
+
+        let chemical = match chem_str.as_str() {
+            "da" | "dopamine" => Chemical::Dopamine,
+            "ne" | "norepinephrine" => Chemical::Norepinephrine,
+            "5ht" | "serotonin" => Chemical::Serotonin,
+            _ => return Err(RuneError::argument(
+                format!("neuromod_inject: unknown chemical '{chem_str}', use da/ne/5ht"),
+                Some(span),
+            )),
+        };
+
+        with_runtime(ctx, |rt| {
+            let nm = rt.neuromods.get_mut(&handle)
+                .ok_or_else(|| RuneError::argument("neuromod_inject: invalid handle", Some(span)))?;
+            nm.inject(chemical, amount);
+            Ok(Value::Nil)
+        })
+    }
+}
+
+/// neuromod_tick(handle) → Nil
+/// Decay all chemicals toward baseline by 1.
+struct NeuromodTickVerb;
+impl Verb for NeuromodTickVerb {
+    fn name(&self) -> &str { "neuromod_tick" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let handle = require_handle(args, 0, "neuromod_tick", HANDLE_NEUROMOD, span)?;
+
+        with_runtime(ctx, |rt| {
+            let nm = rt.neuromods.get_mut(&handle)
+                .ok_or_else(|| RuneError::argument("neuromod_tick: invalid handle", Some(span)))?;
+            nm.tick();
+            Ok(Value::Nil)
+        })
+    }
+}
+
+/// neuromod_gate(handle) → Bool
+/// Check if dopamine gate is open (DA > gate threshold).
+struct NeuromodGateVerb;
+impl Verb for NeuromodGateVerb {
+    fn name(&self) -> &str { "neuromod_gate" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let handle = require_handle(args, 0, "neuromod_gate", HANDLE_NEUROMOD, span)?;
+
+        with_runtime(ctx, |rt| {
+            let nm = rt.neuromods.get(&handle)
+                .ok_or_else(|| RuneError::argument("neuromod_gate: invalid handle", Some(span)))?;
+            Ok(Value::Bool(nm.plasticity_open()))
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Prediction verbs
+// ---------------------------------------------------------------------------
+
+/// predict_new(dims, shift, threshold) → Handle
+/// Create a new prediction engine.
+struct PredictNewVerb;
+impl Verb for PredictNewVerb {
+    fn name(&self) -> &str { "predict_new" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let dims = require_int(args, 0, "predict_new", span)? as usize;
+        let shift = require_int(args, 1, "predict_new", span)? as u8;
+        let threshold = require_int(args, 2, "predict_new", span)? as i32;
+
+        with_runtime(ctx, |rt| {
+            let id = rt.alloc_handle();
+            rt.predictors.insert(id, PredictionEngine::new(dims, shift, threshold));
+            Ok(Value::Handle(runes_core::value::HandleType(HANDLE_PREDICTOR), id))
+        })
+    }
+}
+
+/// predict_observe(handle, actual) → Array [magnitude, is_surprising, direction]
+/// Observe actual output. Updates EMA and returns surprise info.
+struct PredictObserveVerb;
+impl Verb for PredictObserveVerb {
+    fn name(&self) -> &str { "predict_observe" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let handle = require_handle(args, 0, "predict_observe", HANDLE_PREDICTOR, span)?;
+        let actual = require_array(args, 1, "predict_observe", span)?;
+
+        // Optional 3rd arg: target array for direction computation
+        let target = if args.len() >= 3 {
+            match &args[2] {
+                Value::Nil => None,
+                _ => Some(require_array(args, 2, "predict_observe", span)?),
+            }
+        } else {
+            None
+        };
+
+        with_runtime(ctx, |rt| {
+            let pred = rt.predictors.get_mut(&handle)
+                .ok_or_else(|| RuneError::argument("predict_observe: invalid handle", Some(span)))?;
+            let surprise = pred.observe(&actual, target.as_deref());
+            Ok(Value::Array(vec![
+                Value::Integer(surprise.magnitude),
+                Value::Integer(if surprise.is_surprising { 1 } else { 0 }),
+                Value::Integer(surprise.direction as i64),
+            ]))
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Thermogram persistence verbs
+// ---------------------------------------------------------------------------
+
 /// persist_thermo(path) → Nil
 /// Save the Thermogram to disk as a .thermo file.
 struct PersistThermoVerb;
@@ -747,6 +926,209 @@ impl Verb for PersistThermoVerb {
                 .map_err(|e| RuneError::argument(format!("persist_thermo: {e}"), Some(span)))?;
 
             Ok(Value::Nil)
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Utility verbs: sub, abs, negate, concat, sum
+// ---------------------------------------------------------------------------
+
+/// sub(a, b) → Array — element-wise subtract
+struct SubVerb;
+impl Verb for SubVerb {
+    fn name(&self) -> &str { "sub" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let a = require_array(args, 0, "sub", span)?;
+        let b = require_array(args, 1, "sub", span)?;
+        if a.len() != b.len() {
+            return Err(RuneError::argument("sub: arrays must have same length", Some(span)));
+        }
+        let output: Vec<PackedSignal> = a.iter().zip(b.iter())
+            .map(|(x, y)| {
+                let diff = x.current() as i64 - y.current() as i64;
+                packed_from_current(diff as i32)
+            })
+            .collect();
+        Ok(packed_to_values(&output))
+    }
+}
+
+/// abs(signals) → Array — per-element absolute value
+struct AbsVerb;
+impl Verb for AbsVerb {
+    fn name(&self) -> &str { "abs" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let signals = require_array(args, 0, "abs", span)?;
+        let output: Vec<PackedSignal> = signals.iter()
+            .map(|s| packed_from_current(s.current().abs()))
+            .collect();
+        Ok(packed_to_values(&output))
+    }
+}
+
+/// negate(signals) → Array — flip sign of each element
+struct NegateVerb;
+impl Verb for NegateVerb {
+    fn name(&self) -> &str { "negate" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let signals = require_array(args, 0, "negate", span)?;
+        let output: Vec<PackedSignal> = signals.iter()
+            .map(|s| packed_from_current(-s.current()))
+            .collect();
+        Ok(packed_to_values(&output))
+    }
+}
+
+/// concat(a, b) → Array — join two arrays
+struct ConcatVerb;
+impl Verb for ConcatVerb {
+    fn name(&self) -> &str { "concat" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let a = require_array(args, 0, "concat", span)?;
+        let b = require_array(args, 1, "concat", span)?;
+        let mut output = a;
+        output.extend_from_slice(&b);
+        Ok(packed_to_values(&output))
+    }
+}
+
+/// sum(signals) → Integer — sum of all current values
+struct SumVerb;
+impl Verb for SumVerb {
+    fn name(&self) -> &str { "sum" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let signals = require_array(args, 0, "sum", span)?;
+        let total: i64 = signals.iter().map(|s| s.current() as i64).sum();
+        Ok(Value::Integer(total))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Salience routing verbs
+// ---------------------------------------------------------------------------
+
+/// salience_new(n_sources, source_dim) → Handle
+struct SalienceNewVerb;
+impl Verb for SalienceNewVerb {
+    fn name(&self) -> &str { "salience_new" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let n_sources = require_int(args, 0, "salience_new", span)? as usize;
+        let source_dim = require_int(args, 1, "salience_new", span)? as usize;
+
+        with_runtime(ctx, |rt| {
+            let router = SalienceRouter::new(n_sources, source_dim);
+            let id = rt.next_handle;
+            rt.next_handle += 1;
+            rt.salience.insert(id, router);
+            Ok(Value::Handle(runes_core::value::HandleType(HANDLE_SALIENCE), id))
+        })
+    }
+}
+
+/// salience_route(handle, outputs) → Array
+/// Returns [routed_output..., confidence_0, ..., confidence_n, winner]
+struct SalienceRouteVerb;
+impl Verb for SalienceRouteVerb {
+    fn name(&self) -> &str { "salience_route" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let handle = require_handle(args, 0, "salience_route", HANDLE_SALIENCE, span)?;
+        let outputs = require_array(args, 1, "salience_route", span)?;
+
+        with_runtime(ctx, |rt| {
+            let router = rt.salience.get(&handle)
+                .ok_or_else(|| RuneError::argument("salience_route: invalid handle", Some(span)))?;
+            let result = router.route(&outputs);
+
+            // Pack: [routed_output..., conf_0, ..., conf_n, winner]
+            let mut values: Vec<Value> = result.output.iter()
+                .map(|s| Value::Integer(s.as_u8() as i64))
+                .collect();
+            for c in &result.confidences {
+                values.push(Value::Integer(*c));
+            }
+            values.push(Value::Integer(result.winner as i64));
+
+            Ok(Value::Array(values))
+        })
+    }
+}
+
+/// salience_train(handle, outputs, routed, target) → Nil
+struct SalienceTrainVerb;
+impl Verb for SalienceTrainVerb {
+    fn name(&self) -> &str { "salience_train" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let handle = require_handle(args, 0, "salience_train", HANDLE_SALIENCE, span)?;
+        let outputs = require_array(args, 1, "salience_train", span)?;
+        let routed = require_array(args, 2, "salience_train", span)?;
+        let target = require_array(args, 3, "salience_train", span)?;
+
+        with_runtime(ctx, |rt| {
+            let router = rt.salience.get_mut(&handle)
+                .ok_or_else(|| RuneError::argument("salience_train: invalid handle", Some(span)))?;
+            router.train_route(&outputs, &routed, &target);
+            Ok(Value::Nil)
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// neuromod_read verb
+// ---------------------------------------------------------------------------
+
+/// stride_slice(signals, offset, stride) → Array — pick every stride-th element starting at offset
+/// E.g. stride_slice(arr, 0, 2) picks even indices, stride_slice(arr, 1, 2) picks odd indices.
+struct StrideSliceVerb;
+impl Verb for StrideSliceVerb {
+    fn name(&self) -> &str { "stride_slice" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let signals = require_array(args, 0, "stride_slice", span)?;
+        let offset = require_int(args, 1, "stride_slice", span)? as usize;
+        let stride = require_int(args, 2, "stride_slice", span)? as usize;
+        if stride == 0 {
+            return Err(RuneError::argument("stride_slice: stride must be > 0", Some(span)));
+        }
+        let output: Vec<PackedSignal> = signals.iter()
+            .skip(offset)
+            .step_by(stride)
+            .cloned()
+            .collect();
+        Ok(packed_to_values(&output))
+    }
+}
+
+/// neuromod_read(handle, chemical) → Integer — read raw chemical level (0-255)
+struct NeuromodReadVerb;
+impl Verb for NeuromodReadVerb {
+    fn name(&self) -> &str { "neuromod_read" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let handle = require_handle(args, 0, "neuromod_read", HANDLE_NEUROMOD, span)?;
+        let chem_str = require_str(args, 1, "neuromod_read", span)?;
+
+        with_runtime(ctx, |rt| {
+            let nm = rt.neuromods.get(&handle)
+                .ok_or_else(|| RuneError::argument("neuromod_read: invalid handle", Some(span)))?;
+            let level = match chem_str.as_str() {
+                "da" | "dopamine" => nm.dopamine,
+                "ne" | "norepinephrine" => nm.norepinephrine,
+                "5ht" | "serotonin" => nm.serotonin,
+                _ => return Err(RuneError::argument(
+                    format!("neuromod_read: unknown chemical '{chem_str}'"),
+                    Some(span),
+                )),
+            };
+            Ok(Value::Integer(level as i64))
         })
     }
 }

@@ -12,7 +12,9 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use atomic_neural_transistors::{
     AtomicNeuralTransistor, ClassifierANT, CompareANT, DiffANT, GateANT, MergeANT, PackedSignal,
+    MultiplexEncoder, AntSlot, SalienceRouter, PredictionEngine, NeuromodState, Chemical,
 };
+use atomic_neural_transistors::core::weight_matrix::packed_from_current;
 
 // ---------------------------------------------------------------------------
 // Input generators
@@ -282,6 +284,104 @@ end"#;
     });
 }
 
+// ---------------------------------------------------------------------------
+// Multiplex encoder benchmarks
+// ---------------------------------------------------------------------------
+
+fn make_bench_signal(dim: usize) -> Vec<PackedSignal> {
+    (0..dim).map(|i| PackedSignal::pack(1, (i as u8 * 7) % 200, 1)).collect()
+}
+
+fn bench_multiplex_process(c: &mut Criterion) {
+    let mut group = c.benchmark_group("multiplex");
+
+    // 3-ANT multiplex with product-feature closures
+    group.bench_function("3_ant_process", |b| {
+        let mut mux = MultiplexEncoder::new(32, 3, 40);
+        let proto1 = make_bench_signal(32);
+        let proto2: Vec<PackedSignal> = proto1.iter()
+            .map(|s| packed_from_current(-s.current()))
+            .collect();
+        let proto3 = make_bench_signal(32);
+
+        let p1 = proto1.clone();
+        mux.add_slot(AntSlot::with_passthrough("a", Box::new(move |input: &[PackedSignal]| {
+            input.iter().zip(p1.iter()).map(|(x, p)| {
+                packed_from_current((x.current() as i64 * p.current() as i64 / 256) as i32)
+            }).collect()
+        })));
+        let p2 = proto2.clone();
+        mux.add_slot(AntSlot::with_passthrough("b", Box::new(move |input: &[PackedSignal]| {
+            input.iter().zip(p2.iter()).map(|(x, p)| {
+                packed_from_current((x.current() as i64 * p.current() as i64 / 256) as i32)
+            }).collect()
+        })));
+        let p3 = proto3.clone();
+        mux.add_slot(AntSlot::with_passthrough("c", Box::new(move |input: &[PackedSignal]| {
+            input.iter().zip(p3.iter()).map(|(x, p)| {
+                packed_from_current((x.current() as i64 * p.current() as i64 / 256) as i32)
+            }).collect()
+        })));
+        mux.finalize();
+
+        let input = make_bench_signal(32);
+        let target = make_bench_signal(32);
+
+        b.iter(|| mux.process(black_box(&input), Some(black_box(&target))));
+    });
+
+    group.finish();
+}
+
+fn bench_salience_route(c: &mut Criterion) {
+    let router = SalienceRouter::new(3, 32);
+    let outputs = make_bench_signal(96); // 3 × 32
+
+    c.bench_function("salience_route_3x32", |b| {
+        b.iter(|| router.route(black_box(&outputs)));
+    });
+}
+
+fn bench_prediction_observe(c: &mut Criterion) {
+    let mut pred = PredictionEngine::new(32, 3, 40);
+    let signal = make_bench_signal(32);
+    // Warm up
+    for _ in 0..10 {
+        pred.observe(&signal, None);
+    }
+
+    c.bench_function("prediction_observe_32dim", |b| {
+        b.iter(|| pred.observe(black_box(&signal), None));
+    });
+}
+
+fn bench_neuromod(c: &mut Criterion) {
+    let mut group = c.benchmark_group("neuromod");
+
+    group.bench_function("inject_tick", |b| {
+        let mut nm = NeuromodState::new();
+        b.iter(|| {
+            nm.inject(Chemical::Dopamine, 20);
+            nm.tick();
+        });
+    });
+
+    group.bench_function("full_cycle", |b| {
+        let mut nm = NeuromodState::new();
+        b.iter(|| {
+            nm.inject(Chemical::Dopamine, black_box(20));
+            nm.inject(Chemical::Norepinephrine, black_box(10));
+            nm.inject(Chemical::Serotonin, black_box(-5));
+            let _ = black_box(nm.plasticity_open());
+            let _ = black_box(nm.participation_divisor());
+            let _ = black_box(nm.decay_multiplier());
+            nm.tick();
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_classifier_forward,
@@ -294,5 +394,9 @@ criterion_group!(
     bench_output_shapes,
     bench_thermogram_save_load,
     bench_mastery_update,
+    bench_multiplex_process,
+    bench_salience_route,
+    bench_prediction_observe,
+    bench_neuromod,
 );
 criterion_main!(benches);
