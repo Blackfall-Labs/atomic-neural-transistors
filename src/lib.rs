@@ -1,14 +1,15 @@
 //! # Atomic Neural Transistors
 //!
-//! Load and execute .ternsig files. Dimensions from file, not config.
-//! Learning via mastery approach. No floats in neural computation.
+//! Ultra-small (<5K param) composable ternary neural primitives for CPU-only AI.
+//! Uses Runes scripting engine with `ant_ml` module for ternary matrix operations.
 //!
 //! ## Core Usage
 //!
 //! ```rust,ignore
-//! use atomic_neural_transistors::{ClassifierANT, Signal};
+//! use atomic_neural_transistors::{ClassifierANT, PackedSignal};
 //!
 //! let mut classifier = ClassifierANT::new()?;
+//! let input: Vec<PackedSignal> = vec![PackedSignal::pack(1, 128, 1); 32];
 //! let output = classifier.classify(&input)?;
 //! ```
 //!
@@ -28,8 +29,12 @@ pub mod ants;
 pub mod composition;
 pub mod core;
 pub mod error;
+pub mod learning;
+pub mod modules;
+mod weights_init;
 
-pub use core::AtomicNeuralTransistor;
+pub use core::{AtomicNeuralTransistor, WeightMatrix};
 pub use error::{AntError, Result};
 pub use ants::{ClassifierANT, CompareANT, DiffANT, GateANT, MergeANT};
-pub use ternsig::Signal;
+pub use modules::ant_ml::{AntMlModule, AntRuntime};
+pub use ternary_signal::PackedSignal;

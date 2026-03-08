@@ -1,0 +1,14 @@
+rune "merge" do
+  version 1
+end
+use :ant_ml
+
+def forward(input) do
+    w_in = load_synaptic("merge.w_in", 24, 64)
+    w_out = load_synaptic("merge.w_out", 32, 24)
+
+    h = matmul(input, w_in, 24, 64)
+    h = relu(h)
+
+    matmul(h, w_out, 32, 24)
+end

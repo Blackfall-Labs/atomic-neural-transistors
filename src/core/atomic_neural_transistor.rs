@@ -1,96 +1,205 @@
-//! AtomicNeuralTransistor - Load and execute .ternsig files
+//! AtomicNeuralTransistor — Load and execute .rune scripts with ant_ml module.
 //!
-//! Dimensions come from the file. No runtime config.
+//! Replaces the ternsig v1 assembly VM with the Runes scripting engine.
+//! Dimensions and behavior come from the .rune script. No runtime config.
 //! Learning uses mastery approach. No floats.
 
 use crate::error::{AntError, Result};
-use std::path::Path;
-use ternsig::{
-    vm::{assemble, AssembledProgram, Interpreter},
-    Signal,
-};
+use crate::modules::ant_ml::{AntMlModule, AntRuntime};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-/// Atomic Neural Transistor - loads and executes a .ternsig file
+use runes_core::engine::Engine;
+use runes_core::value::Value;
+use runes_parser::lexer::Lexer;
+use runes_parser::parser::Parser;
+use runes_eval::evaluator::Evaluator;
+use ternary_signal::PackedSignal;
+use thermogram::{PlasticityRule, Thermogram};
+
+/// Atomic Neural Transistor — loads and executes a .rune program with ant_ml verbs.
 pub struct AtomicNeuralTransistor {
-    interpreter: Interpreter,
-    input_dim: usize,
-    output_dim: usize,
+    source: String,
+    engine: Engine,
+    runtime: Arc<Mutex<AntRuntime>>,
 }
 
 impl AtomicNeuralTransistor {
-    /// Load from .ternsig file path
+    /// Load from .rune file path.
     pub fn from_file(path: &Path) -> Result<Self> {
         let source = std::fs::read_to_string(path)
             .map_err(|e| AntError::Io(e.to_string()))?;
-        Self::from_source(&source)
+        let base_path = path.parent().map(|p| p.to_path_buf());
+        Self::from_source_with_base(&source, base_path)
     }
 
-    /// Load from .ternsig source string
+    /// Load from .rune source string.
     pub fn from_source(source: &str) -> Result<Self> {
-        let program = assemble(source)
-            .map_err(|e| AntError::Assembly(e.to_string()))?;
-        Self::from_program(&program)
+        Self::from_source_with_base(source, None)
     }
 
-    /// Load from assembled program
-    pub fn from_program(program: &AssembledProgram) -> Result<Self> {
-        let input_dim = program.input_shape.iter().product();
-        let output_dim = program.output_shape.iter().product();
-        let interpreter = Interpreter::from_program(program);
+    /// Load from source with an optional base path for weight file resolution.
+    pub fn from_source_with_base(source: &str, base_path: Option<PathBuf>) -> Result<Self> {
+        let mut rt = AntRuntime::new();
+        if let Some(bp) = base_path {
+            rt = rt.with_base_path(bp);
+        }
+        let runtime = Arc::new(Mutex::new(rt));
+
+        let engine = Engine::builder()
+            .namespace("default")
+                .module(AntMlModule::new())
+            .build()
+            .map_err(|e| AntError::Runes(format!("engine build: {e:?}")))?;
 
         Ok(Self {
-            interpreter,
-            input_dim,
-            output_dim,
+            source: source.to_string(),
+            engine,
+            runtime,
         })
     }
 
-    /// Forward pass - Signal in, Signal out
-    pub fn forward(&mut self, input: &[Signal]) -> Result<Vec<Signal>> {
-        if input.len() != self.input_dim {
-            return Err(AntError::ShapeMismatch {
-                expected: self.input_dim.to_string(),
-                got: input.len().to_string(),
-            });
+    /// Load from source with Thermogram persistence.
+    /// If `thermo_path` exists, loads the Thermogram from disk.
+    /// Otherwise creates a fresh one with the given name.
+    pub fn from_source_with_thermogram(
+        source: &str,
+        base_path: Option<PathBuf>,
+        thermo_name: &str,
+        thermo_path: Option<&Path>,
+    ) -> Result<Self> {
+        let mut rt = AntRuntime::new();
+        if let Some(bp) = base_path {
+            rt = rt.with_base_path(bp);
         }
 
-        self.interpreter
-            .forward(input)
-            .map_err(|e| AntError::Assembly(e))
+        // Load or create Thermogram
+        let thermo = if let Some(tp) = thermo_path {
+            if tp.exists() {
+                Thermogram::load(tp)
+                    .map_err(|e| AntError::Io(format!("thermogram load: {e}")))?
+            } else {
+                Thermogram::new(thermo_name, PlasticityRule::stdp_like())
+            }
+        } else {
+            Thermogram::new(thermo_name, PlasticityRule::stdp_like())
+        };
+        rt.set_thermogram(thermo);
+
+        let runtime = Arc::new(Mutex::new(rt));
+
+        let engine = Engine::builder()
+            .namespace("default")
+                .module(AntMlModule::new())
+            .build()
+            .map_err(|e| AntError::Runes(format!("engine build: {e:?}")))?;
+
+        Ok(Self {
+            source: source.to_string(),
+            engine,
+            runtime,
+        })
     }
 
-    /// Forward pass - i32 in, i32 out
+    /// Save the Thermogram to disk.
+    pub fn save_thermogram(&self, path: &Path) -> Result<()> {
+        let guard = self.runtime.lock()
+            .map_err(|_| AntError::Config("runtime lock poisoned".into()))?;
+        if let Some(thermo) = guard.thermogram() {
+            thermo.save(path)
+                .map_err(|e| AntError::Io(format!("thermogram save: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Execute a named function in the .rune script with the given input.
+    pub fn call(&mut self, func_name: &str, input: &[PackedSignal]) -> Result<Vec<PackedSignal>> {
+        let input_vals: Vec<Value> = input.iter()
+            .map(|s| Value::Integer(s.as_u8() as i64))
+            .collect();
+
+        let result = self.eval_call(func_name, vec![Value::Array(input_vals)])?;
+
+        match result {
+            Value::Array(arr) => {
+                arr.iter()
+                    .map(|v| match v {
+                        Value::Integer(n) => Ok(PackedSignal::from_raw(*n as u8)),
+                        _ => Err(AntError::ShapeMismatch {
+                            expected: "integer array".into(),
+                            got: format!("{}", v.type_name()),
+                        }),
+                    })
+                    .collect()
+            }
+            Value::Integer(n) => {
+                Ok(vec![PackedSignal::from_raw(n as u8)])
+            }
+            _ => Err(AntError::ShapeMismatch {
+                expected: "array or integer".into(),
+                got: result.type_name().into(),
+            }),
+        }
+    }
+
+    /// Execute the .rune script's `forward` function with the given input.
+    pub fn forward(&mut self, input: &[PackedSignal]) -> Result<Vec<PackedSignal>> {
+        self.call("forward", input)
+    }
+
+    /// Execute the .rune script's `forward` function with i32 input/output.
     pub fn forward_i32(&mut self, input: &[i32]) -> Result<Vec<i32>> {
-        if input.len() != self.input_dim {
-            return Err(AntError::ShapeMismatch {
-                expected: self.input_dim.to_string(),
-                got: input.len().to_string(),
-            });
+        let packed: Vec<PackedSignal> = input.iter()
+            .map(|&v| crate::core::weight_matrix::packed_from_current(v))
+            .collect();
+        let output = self.forward(&packed)?;
+        Ok(output.iter().map(|s| s.current()).collect())
+    }
+
+    /// Evaluate the full .rune source, then call a named function.
+    fn eval_call(&mut self, func_name: &str, args: Vec<Value>) -> Result<Value> {
+        // Build script that defines everything, then calls the function
+        let call_args = if args.len() == 1 {
+            "___input___".to_string()
+        } else {
+            (0..args.len()).map(|i| format!("___arg{i}___")).collect::<Vec<_>>().join(", ")
+        };
+
+        let tokens = Lexer::new(&self.source).tokenize()
+            .map_err(|e| AntError::Runes(format!("lex: {e:?}")))?;
+        let program = Parser::new(tokens).parse_program()
+            .map_err(|e| AntError::Runes(format!("parse: {e:?}")))?;
+
+        let mut evaluator = Evaluator::new();
+        evaluator.set_host(self.runtime.clone());
+
+        // First evaluate the script to define functions
+        evaluator.eval_with_engine(&program, &self.engine)
+            .map_err(|e| AntError::Runes(format!("eval: {e}")))?;
+
+        // Set up input variable and call forward
+        for (i, arg) in args.into_iter().enumerate() {
+            if i == 0 {
+                evaluator.define_variable("___input___", arg);
+            } else {
+                evaluator.define_variable(&format!("___arg{i}___"), arg);
+            }
         }
 
-        self.interpreter
-            .forward_i32(input)
-            .map_err(|e| AntError::Assembly(e))
+        // Build and evaluate the call expression
+        let call_src = format!("rune \"call\" do\n  version 1\nend\nuse :ant_ml\n{func_name}({call_args})\n");
+        let call_tokens = Lexer::new(&call_src).tokenize()
+            .map_err(|e| AntError::Runes(format!("call lex: {e:?}")))?;
+        let call_program = Parser::new(call_tokens).parse_program()
+            .map_err(|e| AntError::Runes(format!("call parse: {e:?}")))?;
+
+        evaluator.eval_with_engine(&call_program, &self.engine)
+            .map_err(|e| AntError::Runes(format!("call: {e}")))
     }
 
-    /// Get input dimension (from file)
-    pub fn input_dim(&self) -> usize {
-        self.input_dim
-    }
-
-    /// Get output dimension (from file)
-    pub fn output_dim(&self) -> usize {
-        self.output_dim
-    }
-
-    /// Access interpreter for learning/thermogram operations
-    pub fn interpreter_mut(&mut self) -> &mut Interpreter {
-        &mut self.interpreter
-    }
-
-    /// Access interpreter (read-only)
-    pub fn interpreter(&self) -> &Interpreter {
-        &self.interpreter
+    /// Access the shared runtime (for direct weight manipulation).
+    pub fn runtime(&self) -> &Arc<Mutex<AntRuntime>> {
+        &self.runtime
     }
 }
 
@@ -98,66 +207,53 @@ impl AtomicNeuralTransistor {
 mod tests {
     use super::*;
 
-    const TEST_TERNSIG: &str = r#"
-.registers
-    H0: i32[4]
-    H1: i32[4]
+    const TEST_RUNE: &str = r#"rune "test" do
+  version 1
+end
+use :ant_ml
 
-.program
-    load_input H0
-    relu H1, H0
-    store_output H1
-    halt
-"#;
+def forward(input) do
+    relu(input)
+end"#;
 
     #[test]
     fn test_from_source() {
-        let ant = AtomicNeuralTransistor::from_source(TEST_TERNSIG);
+        let ant = AtomicNeuralTransistor::from_source(TEST_RUNE);
         assert!(ant.is_ok());
-        let ant = ant.unwrap();
-        assert_eq!(ant.input_dim(), 4);
-        assert_eq!(ant.output_dim(), 4);
     }
 
     #[test]
-    fn test_forward_signal() {
-        let mut ant = AtomicNeuralTransistor::from_source(TEST_TERNSIG).unwrap();
+    fn test_forward_relu() {
+        let mut ant = AtomicNeuralTransistor::from_source(TEST_RUNE).unwrap();
         let input = vec![
-            Signal::positive(100),
-            Signal::negative(50),
-            Signal::positive(200),
-            Signal::ZERO,
+            PackedSignal::pack(1, 100, 1),   // positive
+            PackedSignal::pack(-1, 50, 1),   // negative
+            PackedSignal::pack(1, 200, 1),   // positive
+            PackedSignal::ZERO,              // zero
         ];
-        let output = ant.forward(&input);
-        assert!(output.is_ok());
-        let output = output.unwrap();
+        let output = ant.forward(&input).unwrap();
         assert_eq!(output.len(), 4);
-        // ReLU: positive stays, negative becomes zero
-        assert!(output[0].magnitude > 0);
-        assert_eq!(output[1].magnitude, 0); // was negative
-        assert!(output[2].magnitude > 0);
-        assert_eq!(output[3].magnitude, 0);
+        assert!(output[0].is_positive());
+        assert!(!output[1].is_active()); // ReLU clamps negative
+        assert!(output[2].is_positive());
+        assert!(!output[3].is_active());
     }
 
     #[test]
-    fn test_forward_i32() {
-        let mut ant = AtomicNeuralTransistor::from_source(TEST_TERNSIG).unwrap();
-        let input = vec![100, -50, 200, 0];
-        let output = ant.forward_i32(&input);
-        assert!(output.is_ok());
-        let output = output.unwrap();
-        assert_eq!(output.len(), 4);
-        assert_eq!(output[0], 100);
-        assert_eq!(output[1], 0); // ReLU clamps negative
-        assert_eq!(output[2], 200);
-        assert_eq!(output[3], 0);
-    }
+    fn test_zeros_verb() {
+        let source = r#"rune "test" do
+  version 1
+end
+use :ant_ml
 
-    #[test]
-    fn test_shape_mismatch() {
-        let mut ant = AtomicNeuralTransistor::from_source(TEST_TERNSIG).unwrap();
-        let input = vec![Signal::ZERO; 2]; // wrong size
-        let result = ant.forward(&input);
-        assert!(result.is_err());
+def forward(input) do
+    zeros(4)
+end"#;
+        let mut ant = AtomicNeuralTransistor::from_source(source).unwrap();
+        let output = ant.forward(&[PackedSignal::ZERO]).unwrap();
+        assert_eq!(output.len(), 4);
+        for ps in &output {
+            assert_eq!(ps.current(), 0);
+        }
     }
 }

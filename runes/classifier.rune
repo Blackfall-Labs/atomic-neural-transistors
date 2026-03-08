@@ -1,0 +1,45 @@
+rune "classifier" do
+  version 1
+end
+use :ant_ml
+
+def forward(input) do
+    w_in = load_synaptic("classifier.w_in", 24, 32)
+    w_rec = load_synaptic("classifier.w_rec", 24, 24)
+    w_gate = load_synaptic("classifier.w_gate", 24, 24)
+    w_out = load_synaptic("classifier.w_out", 4, 24)
+
+    h = matmul(input, w_in, 24, 32)
+    h = relu(h)
+
+    # Recurrent iteration 1
+    update = matmul(h, w_rec, 24, 24)
+    update = relu(update)
+    gate = matmul(h, w_gate, 24, 24)
+    gate = sigmoid(gate)
+    update = mul(update, gate)
+    h = add(h, update)
+    h = shift(h, 1)
+
+    # Recurrent iteration 2
+    update = matmul(h, w_rec, 24, 24)
+    update = relu(update)
+    gate = matmul(h, w_gate, 24, 24)
+    gate = sigmoid(gate)
+    update = mul(update, gate)
+    h = add(h, update)
+    h = shift(h, 1)
+
+    # Recurrent iteration 3
+    update = matmul(h, w_rec, 24, 24)
+    update = relu(update)
+    gate = matmul(h, w_gate, 24, 24)
+    gate = sigmoid(gate)
+    update = mul(update, gate)
+    h = add(h, update)
+    h = shift(h, 1)
+
+    # Output projection
+    out = matmul(h, w_out, 4, 24)
+    softmax(out)
+end

@@ -1,0 +1,22 @@
+rune "gate" do
+  version 1
+end
+use :ant_ml
+
+def forward(input) do
+    w_in = load_synaptic("gate.w_in", 16, 64)
+    w_out = load_synaptic("gate.w_out", 32, 16)
+
+    # Compute gate values
+    h = matmul(input, w_in, 16, 64)
+    h = relu(h)
+    gate = matmul(h, w_out, 32, 16)
+    gate = sigmoid(gate)
+
+    # Extract original signal (first 32 elements)
+    signal = slice(input, 0, 32)
+
+    # Apply gating: output = signal * gate, then normalize
+    out = mul(signal, gate)
+    shift(out, 8)
+end

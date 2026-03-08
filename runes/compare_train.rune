@@ -1,0 +1,39 @@
+rune "compare_train" do
+  version 1
+end
+use :ant_ml
+
+def train(data) do
+    input = slice(data, 0, 64)
+    target_out = slice(data, 64, 1)
+
+    w_in = load_synaptic("compare.w_in", 16, 64)
+    w_hidden = load_synaptic("compare.w_hidden", 16, 16)
+    w_out = load_synaptic("compare.w_out", 1, 16)
+
+    h1 = matmul(input, w_in, 16, 64)
+    h1 = relu(h1)
+
+    h2 = matmul(h1, w_hidden, 16, 16)
+    h2 = relu(h2)
+
+    out = matmul(h2, w_out, 1, 16)
+
+    mastery_update(w_out, h2, out, target_out, [3, 1, 5])
+
+    out
+end
+
+def forward(input) do
+    w_in = load_synaptic("compare.w_in", 16, 64)
+    w_hidden = load_synaptic("compare.w_hidden", 16, 16)
+    w_out = load_synaptic("compare.w_out", 1, 16)
+
+    h = matmul(input, w_in, 16, 64)
+    h = relu(h)
+
+    h = matmul(h, w_hidden, 16, 16)
+    h = relu(h)
+
+    matmul(h, w_out, 1, 16)
+end
