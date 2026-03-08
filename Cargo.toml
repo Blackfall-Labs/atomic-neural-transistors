@@ -20,6 +20,9 @@ runes-eval = { path = "../runes/runes-eval" }
 # Persistence — thermal progression for synaptic strength history
 thermogram = { path = "../thermogram-rs" }
 
+# Distributed representational memory — signal-vector banks
+databank-rs = { path = "../databank-rs" }
+
 # Error handling
 thiserror = "2.0"
 anyhow = "1.0"

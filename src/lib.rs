@@ -28,8 +28,10 @@
 pub mod ants;
 pub mod composition;
 pub mod core;
+pub mod encoding;
 pub mod error;
 pub mod learning;
+pub mod memory;
 pub mod modules;
 pub mod multiplex;
 pub mod neuromod;
@@ -46,4 +48,6 @@ pub use neuromod::{Chemical, NeuromodState};
 pub use prediction::{PredictionEngine, SurpriseSignal};
 pub use salience::{SalienceRouter, RouteResult};
 pub use multiplex::{MultiplexEncoder, AntSlot, MultiplexResult};
+pub use encoding::{accumulate, encode_byte, encode_str, ENCODING_DIM};
+pub use memory::{MemoryANT, PerceptionResult};
 pub use runes_core::value::Value;
