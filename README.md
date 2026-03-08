@@ -1,6 +1,6 @@
 # Atomic Neural Transistors (ANTs)
 
-**Ultra-small (<5K param) composable neural primitives for real-time AI**
+**Ultra-small (<5K param) composable ternary neural primitives for CPU-only real-time AI**
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
@@ -9,7 +9,7 @@
 
 ## What are ANTs?
 
-ANTs are the **transistors of neural computing** - atomic units that perform single operations with high precision and compose into larger systems.
+ANTs are the **transistors of neural computing** — atomic units that perform a single operation with high precision and compose into larger systems without retraining.
 
 Just as silicon transistors:
 
@@ -19,124 +19,253 @@ Just as silicon transistors:
 
 ANTs:
 
-- Do one thing (compare, classify, diff, etc.)
-- Compose into meshes, then bridges, then cognitive systems
-- Run in microseconds with deterministic behavior
+- Do one thing (compare, classify, diff, gate, merge)
+- Compose into pipelines, constraint checkers, and cognitive systems
+- Run in **microseconds** with **deterministic**, **integer-only** computation
 
-## Pretrained Models
+**No floats. No gradients. No GPUs.** ANTs operate on ternary signals (polarity x magnitude) using integer arithmetic throughout. They learn via [mastery learning](MASTERY.md) — a pressure-based discrete plasticity system, not gradient descent.
 
-| ANT             | Accuracy | Size   | Purpose                |
-| --------------- | -------- | ------ | ---------------------- |
-| `are_equal`     | 99.5%    | 812 KB | Compare two embeddings |
-| `is_empty`      | 100%     | 209 KB | Detect zero embeddings |
-| `contains`      | ~97%     | 1.8 MB | Query in sequence      |
-| `has_duplicate` | 100%     | 1.8 MB | Duplicate detection    |
+---
+
+## Specialized ANTs
+
+| ANT | Purpose | Params | Forward Latency |
+|-----|---------|--------|-----------------|
+| `CompareANT` | Binary similarity detection | 1,296 | 63 µs |
+| `DiffANT` | Change detection | 2,304 | 49 µs |
+| `MergeANT` | Signal fusion | 2,304 | 51 µs |
+| `GateANT` | Signal gating (sigmoid) | 1,536 | 74 µs |
+| `ClassifierANT` | Multi-class classification | 2,016 | 184 µs |
+
+Total across all 5 ANTs: **9,456 parameters**. Each parameter is a `PackedSignal` (1 byte).
+
+---
+
+## Mastery Learning
+
+ANTs learn via **mastery learning** — an integer-only, pressure-based plasticity system. No gradients, no backpropagation, no loss functions.
+
+| Metric | Mastery (Ternary) | Gradient Descent (Float) |
+|--------|-------------------|--------------------------|
+| Cycles to converge | 1-2 | 850+ |
+| Polarity flips | < 100 | 10,000+ sign changes |
+| Total transitions | ~200-300 | Continuous (every step) |
+| Substrate | Integer | Float |
+| Deterministic | Yes | No (float rounding) |
+
+Key mechanisms:
+- **Activity-weighted pressure**: Only the top 25% of active inputs contribute
+- **Weaken-before-flip**: Magnitude depletes to zero before polarity can change
+- **Representable level stepping**: Transitions jump to the next discrete level, not by arbitrary amounts
+- **Pressure threshold gating**: Sustained evidence required before any synaptic change
+
+See [MASTERY.md](MASTERY.md) for the full algorithm.
+
+---
 
 ## Quick Start
 
-```rust
-use atomic_neural_transistors::{AtomicNeuralTransistor, AtomicConfig};
-use candle_core::{Device, DType};
-use candle_nn::{VarBuilder, VarMap};
+### Using Runes scripts (recommended)
 
-// Create a tiny ANT
-let device = Device::Cpu;
-let varmap = VarMap::new();
-let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+ANTs are defined as Runes scripts that compose built-in verbs:
 
-let ant = AtomicNeuralTransistor::new(&AtomicConfig::tiny(32, 1), vb)?;
-println!("Parameters: {}", ant.param_count()); // ~1.5K
+```rune
+rune "compare" do
+  version 1
+end
+use :ant_ml
+
+def forward(input) do
+    w_in = load_synaptic("compare.w_in", 16, 64)
+    w_hidden = load_synaptic("compare.w_hidden", 16, 16)
+    w_out = load_synaptic("compare.w_out", 1, 16)
+
+    h = matmul(input, w_in, 16, 64)
+    h = relu(h)
+    h = matmul(h, w_hidden, 16, 16)
+    h = relu(h)
+    matmul(h, w_out, 1, 16)
+end
 ```
+
+### Using Rust directly
+
+```rust
+use atomic_neural_transistors::{CompareANT, PackedSignal};
+
+let mut compare = CompareANT::new()?;
+let a: Vec<PackedSignal> = (0..32).map(|i| PackedSignal::pack(1, i * 8, 1)).collect();
+let b: Vec<PackedSignal> = (0..32).map(|i| PackedSignal::pack(1, i * 8, 1)).collect();
+let similar = compare.compare(&a, &b)?; // PackedSignal: positive = similar
+```
+
+### Mastery training from scratch
+
+```rust
+use atomic_neural_transistors::core::weight_matrix::{packed_from_current, WeightMatrix};
+use atomic_neural_transistors::learning::{MasteryConfig, MasteryState};
+use atomic_neural_transistors::PackedSignal;
+
+let config = MasteryConfig { pressure_threshold: 3, decay_rate: 1, participation_gate: 5 };
+let mut weights = WeightMatrix::zeros(1, 32);
+let mut mastery = MasteryState::new(32, config);
+
+// Train: provide input features, clamped output, and target
+mastery.update(&mut weights, &features, &[clamped_output], &[target]);
+
+// Decay pressure once per cycle (not per sample)
+mastery.decay();
+```
+
+---
 
 ## Composition Algebra
 
-Complex operations compose from primitives **without additional training**:
+Complex operations compose from trained primitives **without additional learning**:
 
 ```rust
-use atomic_neural_transistors::composition::{contains, has_duplicate, PerfectEquality};
+use atomic_neural_transistors::composition::sequence::{contains, has_duplicate};
 
-let checker = PerfectEquality;
-
-// contains = OR(AreEqual(query, seq[i]) for all i)
-assert!(contains(&checker, 5, &[1, 2, 3, 5, 7]));
-
-// has_duplicate = OR(AreEqual(seq[i], seq[j]) for all i < j)
-assert!(has_duplicate(&checker, &[1, 2, 3, 2, 5]));
+// contains = OR(compare(query, seq[i]) for all i)
+// has_duplicate = OR(compare(seq[i], seq[j]) for all i < j)
 ```
+
+Composition results from the benchmark suite:
+
+| Composition | Built From | Accuracy | Comparisons |
+|-------------|-----------|----------|-------------|
+| `has_duplicate` (seq len 4-8) | CompareANT | 100% | O(n^2) |
+| `contains` (seq len 3-8) | CompareANT | 100% | O(n) |
+| Sudoku 4x4 validation | CompareANT | 100% | 72 per grid |
+| Planning pipeline | ClassifierANT + CompareANT | 100% | per step |
+
+---
+
+## Persistence
+
+ANTs persist via **Thermogram** — a delta-chained format that tracks thermal progression of synaptic strengths (Hot → Warm → Cool → Cold).
+
+```rust
+use thermogram::{Thermogram, Delta, PlasticityRule};
+
+// Save
+let mut thermo = Thermogram::new("compare", PlasticityRule::stdp_like());
+thermo.apply_delta(Delta::create("compare.w_out", weights.data.clone(), "mastery"))?;
+thermo.save(&path)?;
+
+// Load → byte-identical outputs
+let loaded = Thermogram::load(&path)?;
+```
+
+Thermogram I/O benchmarks:
+- **Save** (all 5 ANTs, 9,456 params): 4.1 ms
+- **Load** (all 5 ANTs): 102 µs
+- File sizes: 454 bytes – 2.9 KB per trained ANT
+
+---
+
+## Examples
+
+10 reproducible examples demonstrate mastery learning, composition, and persistence:
+
+```bash
+# Mastery training (all converge in 1-2 cycles)
+cargo run --example compare_mastery      # 100% — similarity detection
+cargo run --example classifier_mastery   # 100% — 4-class classification
+cargo run --example diff_mastery         # 100% — change detection
+cargo run --example gate_mastery         # 96.5% — signal gating
+cargo run --example merge_mastery        # 99.5% — signal fusion
+
+# Composition (no additional learning)
+cargo run --example composition_has_duplicate   # 100% on 500 sequences
+cargo run --example composition_contains        # 100% on 500 queries
+cargo run --example composition_sudoku          # 100% on 200 4x4 grids
+
+# Multi-ANT pipeline
+cargo run --example pipeline_planning    # 100% success — classifier + comparer
+
+# Persistence lifecycle
+cargo run --example persistence_lifecycle  # train → save → destroy → load → verify
+```
+
+---
+
+## Benchmarks
+
+Run with `cargo bench`:
+
+```
+classifier_forward       184 µs
+compare_forward           63 µs
+diff_forward              49 µs
+gate_forward              74 µs
+merge_forward             51 µs
+mastery_update_step       47 µs
+thermogram/save        4.1 ms  (all 5 ANTs)
+thermogram/load        102 µs  (all 5 ANTs)
+```
+
+Example wall times (release, including data generation + training + evaluation):
+
+| Example | Wall Time |
+|---------|-----------|
+| CompareANT mastery | 544 ms |
+| ClassifierANT mastery | 371 ms |
+| DiffANT mastery | 413 ms |
+| GateANT mastery | 424 ms |
+| MergeANT mastery | 453 ms |
+| Sudoku (14,400 comparisons) | 352 ms |
+| Planning pipeline | 363 ms |
+| Persistence lifecycle | 363 ms |
+
+Binary sizes: 177–523 KB per example (release build).
+
+---
 
 ## Architecture
 
 ```
 atomic-neural-transistors/
 ├── src/
-│   ├── config/          # AtomicConfig
-│   ├── core/            # AtomicNeuralTransistor (the fundamental ANT)
-│   ├── ants/            # Specialized ANTs
-│   │   ├── compare.rs   # CompareANT
-│   │   ├── diff.rs      # DiffANT
-│   │   ├── merge.rs     # MergeANT
-│   │   ├── gate.rs      # GateANT
-│   │   └── classifier.rs# ClassifierANT
-│   ├── composition/     # Composition algebra
-│   │   ├── sequence.rs  # contains, has_duplicate, etc.
-│   │   └── grid.rs      # Grid operations
-│   └── pretrained/      # Model loading
-└── models/              # Pretrained weights
+│   ├── core/               # AtomicNeuralTransistor runtime (Runes VM bridge)
+│   │   ├── atomic_neural_transistor.rs
+│   │   └── weight_matrix.rs  # WeightMatrix, PackedSignal matmul
+│   ├── ants/               # Specialized ANT wrappers
+│   │   ├── compare.rs      # CompareANT — binary similarity
+│   │   ├── diff.rs         # DiffANT — change detection
+│   │   ├── merge.rs        # MergeANT — signal fusion
+│   │   ├── gate.rs         # GateANT — sigmoid gating
+│   │   └── classifier.rs   # ClassifierANT — multi-class
+│   ├── learning.rs         # MasteryState, MasteryConfig, pressure engine
+│   ├── modules/
+│   │   └── ant_ml.rs       # Runes verb implementations (matmul, relu, etc.)
+│   ├── composition/        # Composition algebra (contains, has_duplicate, grid)
+│   └── weights_init.rs     # Self-initialization from Thermogram
+├── runes/                  # Runes scripts defining ANT computation
+│   ├── compare.rune
+│   ├── classifier.rune
+│   ├── diff.rune
+│   ├── gate.rune
+│   └── merge.rune
+├── examples/               # 10 reproducible mastery + composition examples
+├── benches/                # Criterion benchmarks
+├── trained/                # Thermogram files (persisted synaptic strengths)
+├── MASTERY.md              # Full mastery learning algorithm documentation
+└── REAL_WORLD_USES.md      # Production deployment history
 ```
 
-## Specialized ANTs
+---
 
-| ANT             | Purpose              | Params |
-| --------------- | -------------------- | ------ |
-| `CompareANT`    | Binary similarity    | ~1.5K  |
-| `DiffANT`       | Difference embedding | ~3K    |
-| `MergeANT`      | Combine signals      | ~3K    |
-| `GateANT`       | Attention routing    | ~2K    |
-| `ClassifierANT` | Multi-class          | ~5-10K |
+## Dependencies
 
-## Examples
+- **ternary-signal** — `PackedSignal`, `Signal`, `Polarity` types (the atom of all signaling)
+- **runes** — Behavioral scripting engine (parser, evaluator, core)
+- **thermogram-rs** — Delta-chained persistence with thermal progression
 
-```bash
-# Basic ANT usage
-cargo run --example basic_usage
+All computation is integer-only. No floating point dependencies. No BLAS. No GPU.
 
-# Composition algebra
-cargo run --example composition
-
-# Sudoku validation
-cargo run --example sudoku_check
-```
-
-## Why ANTs?
-
-### 1. Specialization Beats Generalization
-
-A 117M param model allocates capacity across all tasks. ANTs dedicate 100% of their capacity to one operation.
-
-### 2. Composition Preserves Accuracy
-
-Unlike end-to-end training where errors compound, ANT composition maintains component accuracy. If AreEqual achieves 99.5%, composed operations inherit this precision.
-
-### 3. Edge Deployment
-
-ANTs run on:
-
-- Embedded systems
-- Mobile devices
-- Browsers (via WASM)
-- Microcontrollers
+---
 
 ## License
 
 MIT OR Apache-2.0
-
-## Citation
-
-```bibtex
-@software{ant2024,
-  title={Atomic Neural Transistors},
-  author={Blackfall Labs},
-  year={2024},
-  url={https://github.com/blackfall-labs/atomic-neural-transistors}
-}
-```
