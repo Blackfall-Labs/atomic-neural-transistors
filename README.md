@@ -231,7 +231,7 @@ cargo run --example multiplex_classify   # 3 ANTs, salience routing, DA dynamics
 cargo run --example adaptive_cascade     # specialization + shift adaptation + cascade verification
 
 # Real-world use case
-cargo run --example sensor_anomaly       # 87% detection, 12% FP, 4-type classification, adaptation
+cargo run --example sensor_anomaly       # 92% detection, 4-type classification, Runes-defined ANTs
 ```
 
 ---
@@ -311,7 +311,8 @@ atomic-neural-transistors/
 │   ├── diff.rune
 │   ├── gate.rune
 │   └── merge.rune
-├── examples/               # 12 reproducible examples
+│   ├── sensor_anomaly.rune # Runes-defined ANT pipeline (sensor anomaly example)
+├── examples/               # 13 reproducible examples
 ├── benches/                # Criterion benchmarks
 ├── trained/                # Thermogram files (persisted synaptic strengths)
 ├── MASTERY.md              # Full mastery learning algorithm documentation
