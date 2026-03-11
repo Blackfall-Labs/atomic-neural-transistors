@@ -4,6 +4,33 @@ This document describes how Atomic Neural Transistors learn. This is NOT gradien
 
 ---
 
+## Signal Equation
+
+Every synaptic strength is a PackedSignal with three components:
+
+```
+s = p × m × k
+```
+
+| Component | Symbol | Encoding | Range |
+|-----------|--------|----------|-------|
+| **Polarity** | p | 2 bits (00=zero, 01=+1, 10=−1) | {−1, 0, +1} |
+| **Magnitude** | m | 3-bit code → LUT index | LUT = [0, 1, 4, 16, 32, 64, 128, 255] |
+| **Multiplier** | k | 3-bit code → LUT index | LUT = [0, 1, 4, 16, 32, 64, 128, 255] |
+
+The current value of a signal is `p × LUT[m_code] × LUT[k_code]`. Both magnitude and multiplier index the same 8-entry lookup table. This gives 22 distinct representable positive levels from the 64 unique products, ranging from 0 to 65,025 (255 × 255).
+
+The full byte layout:
+
+```
+[ pp | mmm | kkk ]
+  7-6  5-3   2-0
+```
+
+**All three components matter.** Magnitude without multiplier, or vice versa, gives an incomplete signal. Mastery transitions step through representable levels — the products of m × k — not through m or k independently.
+
+---
+
 ## The Algorithm
 
 ### Step 1: Compute Error Signal
@@ -78,7 +105,7 @@ else (weight is zero):
 
 ### Step 6: Representable Level Stepping
 
-Synaptic strengths in PackedSignal occupy discrete representable levels determined by the 3-bit magnitude × 3-bit multiplier LUT. Transitions step to the **next representable level**, not by an arbitrary amount:
+Synaptic strengths occupy discrete representable levels: the set of all `m × k` products from the 3-bit magnitude and 3-bit multiplier LUTs. Transitions step to the **next representable level**, not by an arbitrary amount:
 
 ```
 REPR_LEVELS = [0, 1, 4, 16, 32, 64, 128, 255, 256, 512, 1020, 1024,
@@ -114,8 +141,9 @@ Input (32 dims)
     ▼
 ┌─────────────────────────────────────┐
 │ Hidden Layer: FROZEN random          │
-│ Synaptic strengths: ±1 polarity,    │
-│ 20-40 magnitude, randomly assigned  │
+│ s = p × m × k where:               │
+│   p = ±1 (random), m = 20-40,      │
+│   k = random (1-255, LOG_LUT)      │
 │ Activation: ReLU (sparse)           │
 │ Learning: NONE (fixed projections)  │
 └─────────────────────────────────────┘
@@ -123,7 +151,7 @@ Input (32 dims)
     ▼
 ┌─────────────────────────────────────┐
 │ Output Layer: LEARNED from zero     │
-│ Synaptic strengths: start at (0, 0) │
+│ s = 0 (p=0, m=0, k=0) initially    │
 │ Activation: Linear                  │
 │ Learning: FULL mastery              │
 └─────────────────────────────────────┘

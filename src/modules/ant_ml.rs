@@ -157,6 +157,39 @@ impl AntRuntime {
     pub fn synaptic_key_handles(&self) -> &HashMap<String, u64> {
         &self.synaptic_keys
     }
+
+    /// Look up a weight matrix by its synaptic key (e.g. "c_parse.classify.w_hidden").
+    ///
+    /// Returns `None` if the key hasn't been loaded yet (call through the rune
+    /// interpreter first to create it).
+    pub fn weights_by_key(&self, key: &str) -> Option<&WeightMatrix> {
+        let handle = self.synaptic_keys.get(key)?;
+        self.weights.get(handle)
+    }
+
+    /// Look up a mutable weight matrix by its synaptic key.
+    pub fn weights_by_key_mut(&mut self, key: &str) -> Option<&mut WeightMatrix> {
+        let handle = *self.synaptic_keys.get(key)?;
+        self.weights.get_mut(&handle)
+    }
+
+    /// Get or create a mastery state for a synaptic key.
+    ///
+    /// If the mastery state doesn't exist yet, it's created with the weight
+    /// matrix's dimensions and default config. Returns `None` if the synaptic
+    /// key doesn't exist.
+    pub fn ensure_mastery_for_key(&mut self, key: &str) -> Option<(&mut MasteryState, &mut WeightMatrix)> {
+        let handle = *self.synaptic_keys.get(key)?;
+        let wm = self.weights.get(&handle)?;
+        let weight_count = wm.data.len();
+        self.mastery.entry(handle).or_insert_with(|| {
+            MasteryState::new(weight_count, MasteryConfig::default())
+        });
+        // Re-borrow both mutably (safe because they're in different HashMaps)
+        let mastery = self.mastery.get_mut(&handle).unwrap();
+        let wm = self.weights.get_mut(&handle).unwrap();
+        Some((mastery, wm))
+    }
 }
 
 /// The ant_ml Runes module.
@@ -170,6 +203,7 @@ impl AntMlModule {
             verbs: vec![
                 Box::new(MatmulVerb),
                 Box::new(ReluVerb),
+                Box::new(NormalizeVerb),
                 Box::new(SigmoidVerb),
                 Box::new(TanhActVerb),
                 Box::new(SoftmaxVerb),
@@ -187,6 +221,7 @@ impl AntMlModule {
                 Box::new(MasteryUpdateVerb),
                 Box::new(MasteryStateVerb),
                 Box::new(LoadSynapticVerb),
+                Box::new(LoadSynapticFrozenVerb),
                 Box::new(SaveSynapticVerb),
                 Box::new(PersistThermoVerb),
                 Box::new(NeuromodNewVerb),
@@ -248,7 +283,7 @@ where
 // ---------------------------------------------------------------------------
 
 fn packed_to_values(signals: &[PackedSignal]) -> Value {
-    Value::Array(signals.iter().map(|s| Value::Integer(s.as_u8() as i64)).collect())
+    Value::Array(Arc::new(signals.iter().map(|s| Value::Integer(s.as_u8() as i64)).collect()))
 }
 
 fn require_int(args: &[Value], idx: usize, name: &str, span: runes_core::Span) -> Result<i64, RuneError> {
@@ -322,6 +357,34 @@ impl Verb for ReluVerb {
             } else {
                 *s
             }
+        }).collect();
+        Ok(packed_to_values(&output))
+    }
+}
+
+/// normalize(signals) → Array
+/// Scale all values so max magnitude = 127, preserving polarity.
+/// This prevents hidden layer outputs from overwhelming the output layer.
+struct NormalizeVerb;
+impl Verb for NormalizeVerb {
+    fn name(&self) -> &str { "normalize" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let signals = require_array(args, 0, "normalize", span)?;
+        if signals.is_empty() {
+            return Ok(packed_to_values(&[]));
+        }
+
+        let max_abs = signals.iter()
+            .map(|s| s.current().unsigned_abs())
+            .max()
+            .unwrap_or(1)
+            .max(1) as i64;
+
+        let output: Vec<PackedSignal> = signals.iter().map(|s| {
+            let c = s.current() as i64;
+            let scaled = (c * 127) / max_abs;
+            packed_from_current(scaled as i32)
         }).collect();
         Ok(packed_to_values(&output))
     }
@@ -555,12 +618,12 @@ impl Verb for UnpackVerb {
         let span = ctx.span;
         let byte = require_int(args, 0, "unpack", span)? as u8;
         let ps = PackedSignal::from_raw(byte);
-        Ok(Value::Array(vec![
+        Ok(Value::Array(Arc::new(vec![
             Value::Integer(ps.polarity() as i64),
             Value::Integer(ps.magnitude() as i64),
             Value::Integer(ps.multiplier() as i64),
             Value::Integer(ps.current() as i64),
-        ]))
+        ])))
     }
 }
 
@@ -614,7 +677,7 @@ impl Verb for ZerosVerb {
         let span = ctx.span;
         let size = require_int(args, 0, "zeros", span)? as usize;
         let arr: Vec<Value> = vec![Value::Integer(PackedSignal::ZERO.as_u8() as i64); size];
-        Ok(Value::Array(arr))
+        Ok(Value::Array(Arc::new(arr)))
     }
 }
 
@@ -668,12 +731,12 @@ impl Verb for MasteryStateVerb {
             let state = rt.mastery.get(&handle)
                 .ok_or_else(|| RuneError::argument("mastery_state: no learning state for handle", Some(span)))?;
 
-            Ok(Value::Array(vec![
+            Ok(Value::Array(Arc::new(vec![
                 Value::Integer(state.steps as i64),
                 Value::Integer(state.transitions as i64),
                 Value::Integer(state.pressure.iter().map(|p| *p as i64).sum()),
                 Value::Integer(state.participation.iter().map(|p| *p as i64).sum()),
-            ]))
+            ])))
         })
     }
 }
@@ -713,6 +776,55 @@ impl Verb for LoadSynapticVerb {
                 }
             } else {
                 WeightMatrix::zeros(rows, cols)
+            };
+
+            let id = rt.alloc_handle();
+            rt.weights.insert(id, wm);
+            rt.synaptic_keys.insert(key, id);
+            Ok(Value::Handle(runes_core::value::HandleType(HANDLE_WEIGHT_MATRIX), id))
+        })
+    }
+}
+
+/// load_synaptic_frozen(key, rows, cols, seed) → Handle
+/// Create a frozen random projection matrix (±1 polarity, 20-40 magnitude).
+/// If the key already exists in Thermogram, loads from there instead.
+/// These matrices are NOT learned — they provide fixed random projections
+/// for the hidden layers per MASTERY.md.
+struct LoadSynapticFrozenVerb;
+impl Verb for LoadSynapticFrozenVerb {
+    fn name(&self) -> &str { "load_synaptic_frozen" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let key = require_str(args, 0, "load_synaptic_frozen", span)?;
+        let rows = require_int(args, 1, "load_synaptic_frozen", span)? as usize;
+        let cols = require_int(args, 2, "load_synaptic_frozen", span)? as usize;
+        let seed = if args.len() > 3 {
+            require_int(args, 3, "load_synaptic_frozen", span)? as u64
+        } else {
+            0xC0DE_CAFE_1234_5678
+        };
+
+        with_runtime(ctx, |rt| {
+            // Dedup: if we already loaded this key, return existing handle
+            if let Some(&handle) = rt.synaptic_keys.get(&key) {
+                return Ok(Value::Handle(runes_core::value::HandleType(HANDLE_WEIGHT_MATRIX), handle));
+            }
+
+            // Try reading from Thermogram first
+            let wm = if let Some(thermo) = &rt.thermogram {
+                if let Ok(Some(data)) = thermo.read(&key) {
+                    if data.len() == rows * cols {
+                        WeightMatrix::from_data(data, rows, cols)
+                            .unwrap_or_else(|| WeightMatrix::random_frozen(rows, cols, seed))
+                    } else {
+                        WeightMatrix::random_frozen(rows, cols, seed)
+                    }
+                } else {
+                    WeightMatrix::random_frozen(rows, cols, seed)
+                }
+            } else {
+                WeightMatrix::random_frozen(rows, cols, seed)
             };
 
             let id = rt.alloc_handle();
@@ -895,11 +1007,11 @@ impl Verb for PredictObserveVerb {
             let pred = rt.predictors.get_mut(&handle)
                 .ok_or_else(|| RuneError::argument("predict_observe: invalid handle", Some(span)))?;
             let surprise = pred.observe(&actual, target.as_deref());
-            Ok(Value::Array(vec![
+            Ok(Value::Array(Arc::new(vec![
                 Value::Integer(surprise.magnitude),
                 Value::Integer(if surprise.is_surprising { 1 } else { 0 }),
                 Value::Integer(surprise.direction as i64),
-            ]))
+            ])))
         })
     }
 }
@@ -1056,7 +1168,7 @@ impl Verb for SalienceRouteVerb {
             }
             values.push(Value::Integer(result.winner as i64));
 
-            Ok(Value::Array(values))
+            Ok(Value::Array(Arc::new(values)))
         })
     }
 }

@@ -33,6 +33,35 @@ impl WeightMatrix {
         }
     }
 
+    /// Create a frozen random projection matrix.
+    ///
+    /// Per MASTERY.md: frozen hidden layers use `s = p × m × k` where
+    /// p = ±1 (random), m = 20-40 (random), k = random (1-255).
+    /// All three components vary — k controls signal gain:
+    ///   k=1 attenuates (>>2), k=16-32 neutral, k=128-255 amplifies (<<2-3).
+    /// These are NOT learned — they provide fixed random projections
+    /// that create class separation for the output layer to learn from.
+    ///
+    /// Uses xorshift64 PRNG seeded by `seed`.
+    pub fn random_frozen(rows: usize, cols: usize, seed: u64) -> Self {
+        // The 8 representable multiplier levels from LOG_LUT
+        const K_LEVELS: [u8; 7] = [1, 4, 16, 32, 64, 128, 255];
+
+        let mut state = if seed == 0 { 0xDEAD_BEEF_CAFE_1234 } else { seed };
+        let mut data = Vec::with_capacity(rows * cols);
+        for _ in 0..rows * cols {
+            // xorshift64
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let pol: i8 = if state & 1 == 0 { 1 } else { -1 };
+            let mag = 20 + ((state >> 8) as u8 % 21); // 20-40 inclusive
+            let k = K_LEVELS[((state >> 16) as usize) % K_LEVELS.len()];
+            data.push(PackedSignal::pack(pol, mag, k));
+        }
+        Self { data, rows, cols }
+    }
+
     /// Create from raw PackedSignal data with shape validation.
     pub fn from_data(data: Vec<PackedSignal>, rows: usize, cols: usize) -> Option<Self> {
         if data.len() != rows * cols {
@@ -115,35 +144,167 @@ impl WeightMatrix {
     }
 }
 
+/// Precomputed sorted table of (product, positive_code, negative_code) for packed_from_current.
+///
+/// Built from the LOG_LUT [0, 1, 4, 16, 32, 64, 128, 255]. For each (mag_code, mul_code)
+/// pair, product = LOG_LUT[mag_code] * LOG_LUT[mul_code]. Entries are sorted by product,
+/// deduplicated (keeping the last code for each product, matching the original loop order).
+/// This turns the 64-iteration brute force search into a binary search over ~30 entries.
+#[derive(Clone, Copy)]
+struct PackedEntry {
+    product: u64,
+    pos_code: u8,
+    neg_code: u8,
+}
+
+/// Build the lookup table at compile time.
+const fn build_packed_table() -> ([PackedEntry; 64], usize) {
+    const LOG_LUT: [u64; 8] = [0, 1, 4, 16, 32, 64, 128, 255];
+    let mut entries = [PackedEntry { product: 0, pos_code: 0, neg_code: 0 }; 64];
+    let mut count = 0usize;
+
+    // Generate all 64 products with their codes
+    let mut mc = 0u8;
+    while mc < 8 {
+        let mut uc = 0u8;
+        while uc < 8 {
+            let product = LOG_LUT[mc as usize] * LOG_LUT[uc as usize];
+            let pos_code = (0b01 << 6) | (mc << 3) | uc;
+            let neg_code = (0b10 << 6) | (mc << 3) | uc;
+            entries[count] = PackedEntry { product, pos_code, neg_code };
+            count += 1;
+            uc += 1;
+        }
+        mc += 1;
+    }
+
+    // Insertion sort by product (const fn can't use sort)
+    let mut i = 1;
+    while i < count {
+        let mut j = i;
+        while j > 0 && entries[j - 1].product > entries[j].product {
+            let tmp = PackedEntry {
+                product: entries[j].product,
+                pos_code: entries[j].pos_code,
+                neg_code: entries[j].neg_code,
+            };
+            entries[j] = PackedEntry {
+                product: entries[j - 1].product,
+                pos_code: entries[j - 1].pos_code,
+                neg_code: entries[j - 1].neg_code,
+            };
+            entries[j - 1] = tmp;
+            j -= 1;
+        }
+        i += 1;
+    }
+
+    // Deduplicate: keep last entry for each product (matches original loop's "last wins")
+    let mut deduped = [PackedEntry { product: 0, pos_code: 0, neg_code: 0 }; 64];
+    let mut dcount = 0usize;
+    let mut k = 0;
+    while k < count {
+        // Find the last entry with this product value
+        let mut last = k;
+        while last + 1 < count && entries[last + 1].product == entries[k].product {
+            last += 1;
+        }
+        deduped[dcount] = PackedEntry {
+            product: entries[last].product,
+            pos_code: entries[last].pos_code,
+            neg_code: entries[last].neg_code,
+        };
+        dcount += 1;
+        k = last + 1;
+    }
+
+    (deduped, dcount)
+}
+
+const PACKED_TABLE_DATA: ([PackedEntry; 64], usize) = build_packed_table();
+const PACKED_TABLE: &[PackedEntry] = {
+    // We can't slice a const array directly, but we know the count.
+    // Use the full 64-entry array; entries beyond count are unused (product=0, duplicates of first).
+    &PACKED_TABLE_DATA.0
+};
+const PACKED_TABLE_LEN: usize = PACKED_TABLE_DATA.1;
+
 /// Convert a raw current value (signed i32) to the nearest PackedSignal.
+///
+/// Uses a precomputed sorted table with binary search instead of brute-forcing
+/// all 64 (magnitude, multiplier) combinations.
 pub fn packed_from_current(current: i32) -> PackedSignal {
     if current == 0 {
         return PackedSignal::ZERO;
     }
-    let polarity: i8 = if current > 0 { 1 } else { -1 };
+    let is_positive = current > 0;
     let abs_val = (current as i64).unsigned_abs();
+    let table = &PACKED_TABLE[..PACKED_TABLE_LEN];
 
-    // Find best (mag_code, mul_code) pair whose product is closest to abs_val
-    const LOG_LUT: [u64; 8] = [0, 1, 4, 16, 32, 64, 128, 255];
-    let mut best_code: u8 = 0;
-    let mut best_dist: u64 = abs_val; // distance from 0
-
-    for mc in 0u8..8 {
-        for uc in 0u8..8 {
-            let product = LOG_LUT[mc as usize] * LOG_LUT[uc as usize];
-            let dist = if product > abs_val {
-                product - abs_val
-            } else {
-                abs_val - product
-            };
-            if dist < best_dist {
-                best_dist = dist;
-                let pol_bits = if polarity > 0 { 0b01 } else { 0b10 };
-                best_code = (pol_bits << 6) | (mc << 3) | uc;
-            }
+    // Binary search for the closest product
+    let mut lo = 0usize;
+    let mut hi = table.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if table[mid].product < abs_val {
+            lo = mid + 1;
+        } else {
+            hi = mid;
         }
     }
-    PackedSignal::from_raw(best_code)
+
+    // Check lo and lo-1 for the closest match
+    let best = if lo >= table.len() {
+        table.len() - 1
+    } else if lo == 0 {
+        0
+    } else {
+        let dist_lo = if table[lo].product >= abs_val {
+            table[lo].product - abs_val
+        } else {
+            abs_val - table[lo].product
+        };
+        let dist_prev = abs_val - table[lo - 1].product;
+        if dist_prev <= dist_lo { lo - 1 } else { lo }
+    };
+
+    let code = if is_positive {
+        table[best].pos_code
+    } else {
+        table[best].neg_code
+    };
+    PackedSignal::from_raw(code)
+}
+
+/// ReLU on packed signals: zero out negative values, pass positive and zero through.
+pub fn relu_packed(signals: &[PackedSignal]) -> Vec<PackedSignal> {
+    signals.iter().map(|s| {
+        if s.is_negative() { PackedSignal::ZERO } else { *s }
+    }).collect()
+}
+
+/// Integer softmax on packed signals.
+///
+/// Shifts all currents so the minimum is 0, then normalizes magnitudes
+/// proportionally to sum to 255. Returns positive-polarity PackedSignals.
+pub fn softmax_packed(signals: &[PackedSignal]) -> Vec<PackedSignal> {
+    if signals.is_empty() {
+        return Vec::new();
+    }
+    let currents: Vec<i32> = signals.iter().map(|s| s.current()).collect();
+    let min_c = *currents.iter().min().unwrap();
+    let shifted: Vec<u64> = currents.iter().map(|&c| (c as i64 - min_c as i64) as u64).collect();
+    let total: u64 = shifted.iter().sum();
+
+    if total == 0 {
+        let uniform = (255 / signals.len() as u8).max(1);
+        signals.iter().map(|_| PackedSignal::pack(1, uniform, 1)).collect()
+    } else {
+        shifted.iter().map(|&s| {
+            let mag = ((s * 255) / total) as u8;
+            PackedSignal::pack(1, mag, 1)
+        }).collect()
+    }
 }
 
 #[cfg(test)]

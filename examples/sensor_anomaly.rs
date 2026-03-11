@@ -191,7 +191,7 @@ fn classify_from_deviation(signal: &[PackedSignal], baseline: &[i32]) -> usize {
 // ---------------------------------------------------------------------------
 
 fn signals_to_value(signals: &[PackedSignal]) -> Value {
-    Value::Array(signals.iter().map(|s| Value::Integer(s.as_u8() as i64)).collect())
+    Value::Array(std::sync::Arc::new(signals.iter().map(|s| Value::Integer(s.as_u8() as i64)).collect()))
 }
 
 fn value_to_signals(val: &Value) -> Vec<PackedSignal> {

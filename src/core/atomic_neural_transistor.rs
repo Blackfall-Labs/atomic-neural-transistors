@@ -22,6 +22,9 @@ pub struct AtomicNeuralTransistor {
     source: String,
     engine: Engine,
     runtime: Arc<Mutex<AntRuntime>>,
+    /// Cached evaluator with function definitions already loaded from the .rune source.
+    /// Populated on first `eval_call` — avoids re-lexing/re-parsing/re-evaluating per call.
+    evaluator: Option<Evaluator>,
 }
 
 impl AtomicNeuralTransistor {
@@ -56,6 +59,7 @@ impl AtomicNeuralTransistor {
             source: source.to_string(),
             engine,
             runtime,
+            evaluator: None,
         })
     }
 
@@ -98,6 +102,7 @@ impl AtomicNeuralTransistor {
             source: source.to_string(),
             engine,
             runtime,
+            evaluator: None,
         })
     }
 
@@ -118,7 +123,7 @@ impl AtomicNeuralTransistor {
             .map(|s| Value::Integer(s.as_u8() as i64))
             .collect();
 
-        let result = self.eval_call(func_name, vec![Value::Array(input_vals)])?;
+        let result = self.eval_call(func_name, vec![Value::Array(Arc::new(input_vals))])?;
 
         match result {
             Value::Array(arr) => {
@@ -164,13 +169,12 @@ impl AtomicNeuralTransistor {
         Ok(output.iter().map(|s| s.current()).collect())
     }
 
-    /// Evaluate the full .rune source, then call a named function.
-    fn eval_call(&mut self, func_name: &str, args: Vec<Value>) -> Result<Value> {
-        // Build argument variable names and call expression
-        let call_args = (0..args.len())
-            .map(|i| format!("___arg{i}___"))
-            .collect::<Vec<_>>()
-            .join(", ");
+    /// Ensure the evaluator is initialized with function definitions from the .rune source.
+    /// Only lexes, parses, and evaluates the full script once — subsequent calls reuse the cached state.
+    fn ensure_evaluator(&mut self) -> Result<()> {
+        if self.evaluator.is_some() {
+            return Ok(());
+        }
 
         let tokens = Lexer::new(&self.source).tokenize()
             .map_err(|e| AntError::Runes(format!("lex: {e:?}")))?;
@@ -180,27 +184,24 @@ impl AtomicNeuralTransistor {
         let mut evaluator = Evaluator::new();
         evaluator.set_host(self.runtime.clone());
 
-        // First evaluate the script to define functions
+        // Evaluate once to register all function definitions in scope
         evaluator.eval_with_engine(&program, &self.engine)
             .map_err(|e| AntError::Runes(format!("eval: {e}")))?;
 
-        // Set up argument variables
-        for (i, arg) in args.into_iter().enumerate() {
-            if i == 0 {
-                // Backward compat: `call()` uses ___input___ for the first arg
-                evaluator.define_variable("___input___", arg.clone());
-            }
-            evaluator.define_variable(&format!("___arg{i}___"), arg);
-        }
+        self.evaluator = Some(evaluator);
+        Ok(())
+    }
 
-        // Build and evaluate the call expression
-        let call_src = format!("rune \"call\" do\n  version 1\nend\nuse :ant_ml\n{func_name}({call_args})\n");
-        let call_tokens = Lexer::new(&call_src).tokenize()
-            .map_err(|e| AntError::Runes(format!("call lex: {e:?}")))?;
-        let call_program = Parser::new(call_tokens).parse_program()
-            .map_err(|e| AntError::Runes(format!("call parse: {e:?}")))?;
+    /// Call a named function in the .rune script.
+    ///
+    /// On first call, lexes/parses/evaluates the full .rune source to register
+    /// function definitions. Subsequent calls use `Evaluator::invoke` to call
+    /// the function directly — no re-parsing, no import re-resolution.
+    fn eval_call(&mut self, func_name: &str, args: Vec<Value>) -> Result<Value> {
+        self.ensure_evaluator()?;
 
-        evaluator.eval_with_engine(&call_program, &self.engine)
+        let evaluator = self.evaluator.as_mut().unwrap();
+        evaluator.invoke(func_name, &args, &self.engine)
             .map_err(|e| AntError::Runes(format!("call: {e}")))
     }
 
