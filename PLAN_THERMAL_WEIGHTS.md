@@ -224,3 +224,75 @@ No changes to .rune scripts. The thermal behavior is in the weight storage, not 
 2. Load session 2, verify weights + temperatures + hits restored
 3. Continue training, verify COLD weights don't change
 4. Verify accuracy maintained or improved across sessions
+
+## Documentation: ANT Engineering Guide
+
+Write a comprehensive guide covering everything learned about building, training, and deploying ANTs. This is the reference document for anyone — human or AI — working with atomic neural transistors going forward.
+
+### Topics to Cover
+
+**Signal Fundamentals**
+- Signal equation: s = p × m × k (polarity × magnitude × multiplier)
+- PackedSignal: 1-byte encoding, 3-bit magnitude + 3-bit multiplier + 2-bit polarity
+- LOG_LUT: [0, 1, 4, 16, 32, 64, 128, 255] — the 8 representable levels per component
+- 22 distinct representable positive magnitudes from m × k products
+- Integer-only arithmetic throughout — no floats, no rounding errors, deterministic
+
+**Weight Architecture**
+- Frozen hidden + learned output: when it works (structured/synthetic data), when it fails (cross-domain generalization)
+- Both layers learning: credit assignment without backprop, hidden target derivation
+- Thermal weights: per-weight plasticity gating, the upgrade path
+- Weight matrix sizing: hidden width vs input dimensionality tradeoffs
+
+**Mastery Learning**
+- Pressure accumulation: direction × input_sign × activity_strength × error_magnitude
+- Activity-weighted participation: only top 25% of active inputs contribute
+- Participation gate: N observations required before a weight can change
+- Pressure threshold: sustained evidence before any transition
+- Pressure decay: per-epoch, not per-sample — allows accumulation within a cycle
+- Weaken-before-flip: magnitude depletes to zero before polarity changes — prevents oscillation
+- Representable level stepping: step_up/step_down through REPR_LEVELS, not arbitrary amounts
+- Why it converges in 1-2 cycles on structured data (tiny state space, activity filtering, pressure hysteresis)
+
+**Neuromodulator Gating**
+- Dopamine: reward gate — DA below threshold means no learning happens
+- Norepinephrine: attention breadth — controls participation divisor (narrow vs broad)
+- Serotonin: stability — controls pressure decay rate (faster vs slower)
+- DA ↔ 5HT antagonism prevents saturation
+- All chemicals are integers (0-255), decay toward baseline (128)
+
+**Composition**
+- ANTs as transistors: one operation, composed into circuits
+- Composition without retraining: trained primitives combine algebraically
+- CompareANT → contains, has_duplicate, sudoku validation
+- Multi-ANT pipelines: ClassifierANT + CompareANT for planning
+
+**Common Failure Modes**
+- Random hidden projections don't generalize across domains (speaker variation, etc.)
+- Unfreezing both layers simultaneously: hidden thrashes, output can't keep up
+- Learning rate doesn't exist — but pressure_threshold and participation_gate serve the same role
+- Too-low participation gate: learns from noise
+- Too-high pressure threshold: never transitions
+- Not decaying pressure per epoch: pressure accumulates across epochs, causing delayed spurious transitions
+
+**Testing Best Practices**
+- Always track train AND test accuracy per epoch — the gap tells you everything
+- Flat train accuracy = converged. Flat test accuracy = not generalizing.
+- Test accuracy climbing = the right features are being learned
+- Train high / test low = overfitting to training distribution
+- Use curriculum: start small, prove it works, scale up
+- Gate advancement on TEST accuracy, not train
+- Multiple sessions with persistence: verify accuracy carries over
+
+**Persistence**
+- Thermogram integration: delta-chained format with thermal progression
+- .ant file format: native binary, per-weight thermal state
+- Save after every epoch — crash recovery
+- Load and continue: verify no accuracy regression from save/load cycle
+
+**Real-World Deployment Lessons**
+- From hush-v3 phoneme detection: 39 parallel binary detectors outperform single multi-class
+- Emergent classification from competing detectors, not engineered architecture
+- Cross-speaker invariance requires learning, not random projections
+- Curriculum with same-data-many-speakers before expanding vocabulary
+- Per-weight cooling is the mechanism for consolidating cross-domain invariants
