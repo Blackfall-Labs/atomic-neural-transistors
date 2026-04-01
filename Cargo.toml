@@ -23,6 +23,9 @@ thermogram = { path = "../thermogram-rs" }
 # Distributed representational memory — signal-vector banks
 databank-rs = { path = "../databank-rs" }
 
+# Checksums
+crc32fast = "1.4"
+
 # Error handling
 thiserror = "2.0"
 anyhow = "1.0"

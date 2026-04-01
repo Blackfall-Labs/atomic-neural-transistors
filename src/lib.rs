@@ -39,7 +39,7 @@ pub mod prediction;
 pub mod salience;
 mod weights_init;
 
-pub use core::{AtomicNeuralTransistor, WeightMatrix};
+pub use core::{AtomicNeuralTransistor, WeightMatrix, ThermalWeight, ThermalWeightMatrix, ThermalMasteryConfig};
 pub use error::{AntError, Result};
 pub use ants::{ClassifierANT, CompareANT, DiffANT, GateANT, MergeANT};
 pub use modules::ant_ml::{AntMlModule, AntRuntime};
