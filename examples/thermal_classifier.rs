@@ -55,13 +55,36 @@ fn add_noise(rng: &mut Rng, proto: &[PackedSignal]) -> Vec<PackedSignal> {
     }).collect()
 }
 
-/// Domain-shifted noise (larger, different distribution — simulates cross-speaker).
+/// Domain-shifted noise — simulates cross-speaker variation.
+/// Rotates feature pairs (swaps adjacent dimensions with mixing) AND
+/// applies different magnitude scaling. This breaks frozen random projections
+/// because the hidden layer sees a fundamentally different input distribution.
 fn add_shifted_noise(rng: &mut Rng, proto: &[PackedSignal]) -> Vec<PackedSignal> {
-    proto.iter().map(|s| {
-        let noise = rng.next_i32(161) - 80; // [-80, 80] — 2× wider
-        let scale_shift = if rng.next() % 3 == 0 { 2 } else { 1 }; // occasional 2× scaling
-        packed_from_current(s.current().saturating_add(noise) * scale_shift)
-    }).collect()
+    let mut result: Vec<PackedSignal> = proto.iter().map(|s| {
+        let noise = rng.next_i32(81) - 40;
+        packed_from_current(s.current().saturating_add(noise))
+    }).collect();
+
+    // Rotate adjacent dimension pairs: mix dim[i] and dim[i+1]
+    // This simulates speaker-dependent spectral tilt / formant shift
+    for i in (0..result.len() - 1).step_by(2) {
+        let a = result[i].current() as i64;
+        let b = result[i + 1].current() as i64;
+        // Rotation: a' = 0.7a + 0.3b, b' = -0.3a + 0.7b (approximated in integer)
+        let a_new = (a * 7 + b * 3) / 10;
+        let b_new = (-a * 3 + b * 7) / 10;
+        result[i] = packed_from_current(a_new as i32);
+        result[i + 1] = packed_from_current(b_new as i32);
+    }
+
+    // Scale odd dimensions by 1.5×, even by 0.7× (spectral tilt)
+    for (i, s) in result.iter_mut().enumerate() {
+        let c = s.current() as i64;
+        let scaled = if i % 2 == 0 { c * 7 / 10 } else { c * 15 / 10 };
+        *s = packed_from_current(scaled as i32);
+    }
+
+    result
 }
 
 fn generate_train(rng: &mut Rng, n: usize, protos: &[Vec<PackedSignal>]) -> Vec<Sample> {
@@ -198,17 +221,27 @@ impl ThermalNetwork {
         // Output layer mastery
         self.ms_out.update(&mut self.w_out, &h, &clamped_out, &target_out, correct);
 
-        // Hidden layer mastery: target derived from output weights
+        // Hidden layer mastery: target derived from output ERROR × output weights.
+        // Only adjust hidden weights in proportion to how wrong the output is.
+        // If output is already correct (error≈0), hidden target ≈ current hidden → no change.
+        let errors: Vec<i64> = (0..4).map(|c| {
+            target_out[c].current() as i64 - clamped_out[c].current() as i64
+        }).collect();
+
         let target_hidden: Vec<PackedSignal> = (0..24).map(|i| {
-            // For each hidden neuron, what should it produce?
-            // Sum of (output_weight × target_direction) across output neurons
-            let mut desired: i64 = 0;
+            let h_cur = h[i].current() as i64;
+            // Nudge = sum of (error × output_weight_sign) / num_outputs.
+            // Proportional to how wrong we are. Larger errors push harder.
+            let mut nudge: i64 = 0;
             for c in 0..4 {
-                let w_val = self.w_out.get(c, i).signal.current() as i64;
-                let t_dir: i64 = if c == class { 1 } else { -1 };
-                desired += w_val * t_dir;
+                let w_sign = self.w_out.get(c, i).signal.current().signum() as i64;
+                // Scale error to a manageable range: divide by 4 to dampen
+                let scaled_error = errors[c] / 4;
+                nudge += scaled_error * w_sign;
             }
-            packed_from_current(desired.clamp(-127, 127) as i32)
+            // Clamp nudge so hidden layer moves steadily, not violently
+            let target = h_cur + nudge.clamp(-32, 32);
+            packed_from_current(target.clamp(-127, 127) as i32)
         }).collect();
         let clamped_hidden: Vec<PackedSignal> = h.iter()
             .map(|s| packed_from_current(s.current().clamp(-127, 127))).collect();
