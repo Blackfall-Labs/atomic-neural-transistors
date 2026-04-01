@@ -75,6 +75,23 @@ impl ThermalMasteryState {
             .max(1);
         let activity_threshold = max_input / 4; // top 25%
 
+        // Pass 1: Hit counting on correct detections (BEFORE error loop).
+        // Weights that participate in correct detections get cooled.
+        // This happens even when error == 0 (output matches target perfectly).
+        if correct {
+            for j in 0..weights.cols {
+                let input_abs = input[j].current().unsigned_abs();
+                if input_abs > activity_threshold {
+                    // Hit ALL rows' weights for this active input column
+                    for i in 0..weights.rows {
+                        let w_idx = i * weights.cols + j;
+                        weights.data[w_idx].hit(self.config.cooling_rate);
+                    }
+                }
+            }
+        }
+
+        // Pass 2: Pressure accumulation and transitions (only when there IS error).
         for i in 0..weights.rows {
             let error = target[i].current() as i64 - output[i].current() as i64;
             if error == 0 { continue; }
@@ -100,7 +117,7 @@ impl ThermalMasteryState {
                 // Error magnitude
                 let error_mag = ((error.abs().min(127) as i32) + 31) / 32;
 
-                // Accumulate pressure (stored in the weight itself)
+                // Accumulate pressure
                 let pressure_delta = direction * input_sign * activity_strength * error_mag;
                 let tw = &mut weights.data[w_idx];
                 tw.pressure = tw.pressure.saturating_add(pressure_delta as i16);
@@ -113,11 +130,6 @@ impl ThermalMasteryState {
                     let needed = tw.pressure.signum() as i32;
                     apply_transition(&mut tw.signal, needed, &mut self.transitions);
                     tw.pressure = 0;
-                }
-
-                // Hit counting: if this was a correct detection and this weight participated
-                if correct && input_abs > activity_threshold {
-                    tw.hit(self.config.cooling_rate);
                 }
             }
         }
