@@ -31,6 +31,7 @@ pub mod core;
 pub mod encoding;
 pub mod error;
 pub mod learning;
+pub mod thermal_mastery;
 pub mod memory;
 pub mod modules;
 pub mod multiplex;
