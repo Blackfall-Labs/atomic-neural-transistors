@@ -115,14 +115,14 @@ fn process_tick(
     let out_freq = ant.call_values("frequency_forward", vec![input_val])
         .expect("frequency_forward failed");
 
-    let mag_delta = ant.call_values("join", vec![out_mag, out_delta])
+    let mag_delta = ant.call_values("concat", vec![out_mag, out_delta])
         .expect("join failed");
-    let all_outputs = ant.call_values("join", vec![mag_delta, out_freq])
+    let all_outputs = ant.call_values("concat", vec![mag_delta, out_freq])
         .expect("join failed");
 
-    let route_result = ant.call_values("route", vec![sal_handle.clone(), all_outputs])
+    let route_result = ant.call_values("salience_route", vec![sal_handle.clone(), all_outputs])
         .expect("route failed");
-    let routed = ant.call_values("extract", vec![route_result, Value::Integer(0), Value::Integer(32)])
+    let routed = ant.call_values("slice", vec![route_result, Value::Integer(0), Value::Integer(32)])
         .expect("extract failed");
 
     let routed_signals: Vec<Signal> = match &routed {
@@ -136,7 +136,7 @@ fn process_tick(
         Some(t) => signals_to_value(t),
         None => Value::Nil,
     };
-    let surprise = ant.call_values("observe", vec![
+    let surprise = ant.call_values("predict_observe", vec![
         pred_handle.clone(), routed, target_val,
     ]).expect("observe failed");
 
@@ -144,13 +144,13 @@ fn process_tick(
     let is_surprising = value_array_int(&surprise, 1) != 0;
     let direction = value_array_int(&surprise, 2);
 
-    ant.call_values("tick", vec![nm_handle.clone()]).ok();
+    ant.call_values("neuromod_tick", vec![nm_handle.clone()]).ok();
 
     (routed_signals, surprise_mag, is_surprising, direction)
 }
 
 fn read_da(ant: &mut AtomicNeuralTransistor, nm_handle: &Value) -> i64 {
-    match ant.call_values("read_chem", vec![nm_handle.clone(), Value::String("da".into())]) {
+    match ant.call_values("neuromod_read", vec![nm_handle.clone(), Value::String("da".into())]) {
         Ok(Value::Integer(n)) => n,
         _ => 128,
     }
@@ -167,11 +167,11 @@ fn main() {
     let mut ant = AtomicNeuralTransistor::from_source(source)
         .expect("Failed to load sensor_anomaly.rune");
 
-    let nm_handle = ant.call_values("create_neuromod", vec![]).expect("create_neuromod failed");
-    let pred_handle = ant.call_values("create_predictor", vec![
+    let nm_handle = ant.call_values("neuromod_new", vec![]).expect("create_neuromod failed");
+    let pred_handle = ant.call_values("predict_new", vec![
         Value::Integer(output_dim as i64), Value::Integer(2), Value::Integer(25),
     ]).expect("create_predictor failed");
-    let sal_handle = ant.call_values("create_salience", vec![
+    let sal_handle = ant.call_values("salience_new", vec![
         Value::Integer(3), Value::Integer(output_dim as i64),
     ]).expect("create_salience failed");
 
@@ -225,7 +225,7 @@ fn main() {
             total_anomalies += 1;
             if is_surprising {
                 detected_anomalies += 1;
-                ant.call_values("inject", vec![
+                ant.call_values("neuromod_inject", vec![
                     nm_handle.clone(), Value::String("da".into()), Value::Integer(15),
                 ]).ok();
             }
@@ -252,10 +252,10 @@ fn main() {
     println!("\n--- Phase 3: Sensor Recalibration (100 ticks) ---");
 
     // Reset predictor
-    let pred_handle = ant.call_values("create_predictor", vec![
+    let pred_handle = ant.call_values("predict_new", vec![
         Value::Integer(output_dim as i64), Value::Integer(2), Value::Integer(25),
     ]).expect("create_predictor failed");
-    let nm_handle = ant.call_values("create_neuromod", vec![]).expect("create_neuromod failed");
+    let nm_handle = ant.call_values("neuromod_new", vec![]).expect("create_neuromod failed");
 
     // Re-establish baseline
     for _ in 0..20u32 {

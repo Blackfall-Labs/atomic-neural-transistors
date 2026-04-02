@@ -1,6 +1,7 @@
-rune "classifier" do
+meta {
+  name "classifier"
   version 1
-end
+}
 use :ant_ml
 
 def forward(input) do

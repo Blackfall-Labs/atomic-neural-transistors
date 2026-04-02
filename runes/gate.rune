@@ -1,6 +1,7 @@
-rune "gate" do
+meta {
+  name "gate"
   version 1
-end
+}
 use :ant_ml
 
 def forward(input) do

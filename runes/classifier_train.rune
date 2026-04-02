@@ -1,6 +1,7 @@
-rune "classifier_train" do
+meta {
+  name "classifier_train"
   version 1
-end
+}
 use :ant_ml
 
 def train(data) do

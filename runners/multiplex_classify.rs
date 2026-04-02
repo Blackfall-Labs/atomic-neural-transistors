@@ -24,12 +24,12 @@ fn main() {
         .expect("Failed to load multiplex_features.rune");
 
     // Create handles for salience, prediction, neuromod
-    let nm_handle = ant.call_values("create_neuromod", vec![])
+    let nm_handle = ant.call_values("neuromod_new", vec![])
         .expect("create_neuromod failed");
-    let pred_handle = ant.call_values("create_predictor", vec![
+    let pred_handle = ant.call_values("predict_new", vec![
         Value::Integer(32), Value::Integer(2), Value::Integer(40),
     ]).expect("create_predictor failed");
-    let sal_handle = ant.call_values("create_salience", vec![
+    let sal_handle = ant.call_values("salience_new", vec![
         Value::Integer(3), Value::Integer(32),
     ]).expect("create_salience failed");
 
@@ -81,22 +81,22 @@ fn main() {
                 .expect("identity_features failed");
 
             // Concatenate all outputs for salience routing
-            let cat01 = ant.call_values("join", vec![out0, out1])
+            let cat01 = ant.call_values("concat", vec![out0, out1])
                 .expect("join failed");
-            let all_outputs = ant.call_values("join", vec![cat01, out2])
+            let all_outputs = ant.call_values("concat", vec![cat01, out2])
                 .expect("join failed");
 
             // Route through salience
-            let route_result = ant.call_values("route", vec![sal_handle.clone(), all_outputs])
+            let route_result = ant.call_values("salience_route", vec![sal_handle.clone(), all_outputs])
                 .expect("route failed");
 
             // Extract routed output (first 32 elements)
-            let routed = ant.call_values("extract", vec![route_result, Value::Integer(0), Value::Integer(32)])
+            let routed = ant.call_values("slice", vec![route_result, Value::Integer(0), Value::Integer(32)])
                 .expect("extract failed");
 
             // Prediction: observe with target
             let target = Value::Array(Arc::new(class_targets[sample.class].clone()));
-            let surprise = ant.call_values("observe", vec![
+            let surprise = ant.call_values("predict_observe", vec![
                 pred_handle.clone(), routed.clone(), target,
             ]).expect("observe failed");
 
@@ -132,7 +132,7 @@ fn main() {
             }
 
             // Tick neuromod
-            ant.call_values("tick", vec![nm_handle.clone()]).ok();
+            ant.call_values("neuromod_tick", vec![nm_handle.clone()]).ok();
         }
 
         let acc = cycle_correct as f64 / train_data.len() as f64 * 100.0;
@@ -163,12 +163,12 @@ fn main() {
         let out2 = ant.call_values("identity_features", vec![input_arr])
             .expect("identity_features failed");
 
-        let cat01 = ant.call_values("join", vec![out0, out1]).expect("join failed");
-        let all_outputs = ant.call_values("join", vec![cat01, out2]).expect("join failed");
+        let cat01 = ant.call_values("concat", vec![out0, out1]).expect("join failed");
+        let all_outputs = ant.call_values("concat", vec![cat01, out2]).expect("join failed");
 
-        let route_result = ant.call_values("route", vec![sal_handle.clone(), all_outputs])
+        let route_result = ant.call_values("salience_route", vec![sal_handle.clone(), all_outputs])
             .expect("route failed");
-        let routed = ant.call_values("extract", vec![route_result, Value::Integer(0), Value::Integer(32)])
+        let routed = ant.call_values("slice", vec![route_result, Value::Integer(0), Value::Integer(32)])
             .expect("extract failed");
 
         let routed_vals: Vec<i64> = match &routed {
@@ -196,7 +196,7 @@ fn main() {
     println!("  Learning moments: {}", learning_count);
 
     // Read neuromod state
-    let da = ant.call_values("read_chem", vec![nm_handle.clone(), Value::String("da".into())])
+    let da = ant.call_values("neuromod_read", vec![nm_handle.clone(), Value::String("da".into())])
         .unwrap_or(Value::Integer(128));
     println!("\n  DA final: {:?}", da);
 

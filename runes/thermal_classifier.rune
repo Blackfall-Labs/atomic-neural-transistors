@@ -1,6 +1,7 @@
-rune "thermal_classifier" do
+meta {
+  name "thermal_classifier"
   version 1
-end
+}
 use :ant_ml
 
 # Thermal classifier: both regions learn with temperature-gated plasticity.

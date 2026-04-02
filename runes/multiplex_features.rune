@@ -1,6 +1,7 @@
-rune "multiplex_features" do
+meta {
+  name "multiplex_features"
   version 1
-end
+}
 use :ant_ml
 
 # Feature extractors for multiplex classification.
@@ -24,57 +25,4 @@ end
 # Identity features: pass through with normalization.
 def identity_features(input) do
     normalize(input)
-end
-
-# Orchestration helpers — wrap module verbs as callable functions.
-def create_neuromod() do
-    neuromod_new()
-end
-
-def create_predictor(dims, shift, threshold) do
-    predict_new(dims, shift, threshold)
-end
-
-def create_salience(n_sources, source_dim) do
-    salience_new(n_sources, source_dim)
-end
-
-def inject(handle, chem, amount) do
-    neuromod_inject(handle, chem, amount)
-end
-
-def tick(handle) do
-    neuromod_tick(handle)
-end
-
-def gate(handle) do
-    neuromod_gate(handle)
-end
-
-def observe(handle, actual, target) do
-    predict_observe(handle, actual, target)
-end
-
-def observe_no_target(handle, actual) do
-    predict_observe(handle, actual)
-end
-
-def route(handle, outputs) do
-    salience_route(handle, outputs)
-end
-
-def read_chem(handle, chem) do
-    neuromod_read(handle, chem)
-end
-
-def join(a, b) do
-    concat(a, b)
-end
-
-def extract(arr, start, len) do
-    slice(arr, start, len)
-end
-
-def train_route(handle, outputs, routed, target) do
-    salience_train(handle, outputs, routed, target)
 end

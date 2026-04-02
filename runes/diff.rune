@@ -1,6 +1,7 @@
-rune "diff" do
+meta {
+  name "diff"
   version 1
-end
+}
 use :ant_ml
 
 def forward(input) do

@@ -1,6 +1,7 @@
-rune "debug_mastery" do
+meta {
+  name "debug_mastery"
   version 1
-end
+}
 use :ant_ml
 
 # Debug mastery: minimal diagnostics for mastery learning mechanics.

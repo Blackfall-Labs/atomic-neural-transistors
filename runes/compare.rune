@@ -1,6 +1,7 @@
-rune "compare" do
+meta {
+  name "compare"
   version 1
-end
+}
 use :ant_ml
 
 def forward(input) do

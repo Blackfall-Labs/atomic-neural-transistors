@@ -1,6 +1,7 @@
-rune "diff_train" do
+meta {
+  name "diff_train"
   version 1
-end
+}
 use :ant_ml
 
 # DiffANT: change detector on 32-dim signal pairs.

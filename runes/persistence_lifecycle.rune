@@ -1,6 +1,7 @@
-rune "persistence_lifecycle" do
+meta {
+  name "persistence_lifecycle"
   version 1
-end
+}
 use :ant_ml
 
 # Persistence lifecycle: train, save, load, verify, continue.

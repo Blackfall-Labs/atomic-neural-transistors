@@ -1,6 +1,7 @@
-rune "merge" do
+meta {
+  name "merge"
   version 1
-end
+}
 use :ant_ml
 
 def forward(input) do

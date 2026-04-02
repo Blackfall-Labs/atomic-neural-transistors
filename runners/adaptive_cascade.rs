@@ -35,12 +35,12 @@ fn main() {
         .expect("Failed to load cascade_features.rune");
 
     // Create handles
-    let nm_handle = mux.call_values("create_neuromod", vec![])
+    let nm_handle = mux.call_values("neuromod_new", vec![])
         .expect("create_neuromod failed");
-    let pred_handle = mux.call_values("create_predictor", vec![
+    let pred_handle = mux.call_values("predict_new", vec![
         Value::Integer(32), Value::Integer(2), Value::Integer(20),
     ]).expect("create_predictor failed");
-    let sal_handle = mux.call_values("create_salience", vec![
+    let sal_handle = mux.call_values("salience_new", vec![
         Value::Integer(3), Value::Integer(32),
     ]).expect("create_salience failed");
 
@@ -72,12 +72,12 @@ fn main() {
         let out2 = mux.call_values("identity_features", vec![input_arr])
             .expect("identity_features failed");
 
-        let cat01 = mux.call_values("join", vec![out0, out1]).expect("join failed");
-        let all = mux.call_values("join", vec![cat01, out2]).expect("join failed");
+        let cat01 = mux.call_values("concat", vec![out0, out1]).expect("join failed");
+        let all = mux.call_values("concat", vec![cat01, out2]).expect("join failed");
 
-        let routed = mux.call_values("route", vec![sal_handle.clone(), all])
+        let routed = mux.call_values("salience_route", vec![sal_handle.clone(), all])
             .expect("route failed");
-        let output = mux.call_values("extract", vec![routed, Value::Integer(0), Value::Integer(32)])
+        let output = mux.call_values("slice", vec![routed, Value::Integer(0), Value::Integer(32)])
             .expect("extract failed");
 
         // Prediction
@@ -85,7 +85,7 @@ fn main() {
             Some(t) => Value::Array(Arc::new(t.iter().map(|&v| Value::Integer(v)).collect())),
             None => Value::Nil,
         };
-        let surprise = mux.call_values("observe", vec![
+        let surprise = mux.call_values("predict_observe", vec![
             pred_handle.clone(), output.clone(), target_val,
         ]).expect("observe failed");
 
@@ -96,7 +96,7 @@ fn main() {
             _ => false,
         };
 
-        mux.call_values("tick", vec![nm_handle.clone()]).ok();
+        mux.call_values("neuromod_tick", vec![nm_handle.clone()]).ok();
 
         let vals: Vec<i64> = match &output {
             Value::Array(arr) => arr.iter().map(|v| {
@@ -224,7 +224,7 @@ fn main() {
     println!("  Agreement rate:     {:.1}% ({}/{})",
         agree as f64 / total as f64 * 100.0, agree, total);
 
-    let da = mux.call_values("read_chem", vec![nm_handle.clone(), Value::String("da".into())])
+    let da = mux.call_values("neuromod_read", vec![nm_handle.clone(), Value::String("da".into())])
         .unwrap_or(Value::Integer(128));
     println!("  DA final: {:?}", da);
 

@@ -1,6 +1,7 @@
-rune "merge_train" do
+meta {
+  name "merge_train"
   version 1
-end
+}
 use :ant_ml
 
 # MergeANT: fuse two 32-dim signals into one 32-dim output.

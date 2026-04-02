@@ -1,6 +1,7 @@
-rune "gate_train" do
+meta {
+  name "gate_train"
   version 1
-end
+}
 use :ant_ml
 
 # GateANT: learn to pass/block signal dimensions based on control context.

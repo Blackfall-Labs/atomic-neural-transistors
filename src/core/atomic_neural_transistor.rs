@@ -151,9 +151,10 @@ impl AtomicNeuralTransistor {
 mod tests {
     use super::*;
 
-    const TEST_RUNE: &str = r#"rune "test" do
+    const TEST_RUNE: &str = r#"meta {
+  name "test"
   version 1
-end
+}
 use :ant_ml
 
 def forward(input) do
@@ -185,9 +186,10 @@ end"#;
 
     #[test]
     fn test_zeros_verb() {
-        let source = r#"rune "test" do
+        let source = r#"meta {
+  name "test"
   version 1
-end
+}
 use :ant_ml
 
 def forward(input) do

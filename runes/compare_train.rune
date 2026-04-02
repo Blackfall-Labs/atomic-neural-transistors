@@ -1,6 +1,7 @@
-rune "compare_train" do
+meta {
+  name "compare_train"
   version 1
-end
+}
 use :ant_ml
 
 def train(data) do
