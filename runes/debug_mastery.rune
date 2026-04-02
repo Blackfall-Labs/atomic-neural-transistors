@@ -1,0 +1,36 @@
+rune "debug_mastery" do
+  version 1
+end
+use :ant_ml
+
+# Debug mastery: minimal diagnostics for mastery learning mechanics.
+
+def train_minimal(data) do
+    input = slice(data, 0, 2)
+    target = slice(data, 2, 1)
+
+    w = load_synaptic("debug.w", 1, 2)
+    out = matmul(input, w)
+    mastery_update(w, input, out, target, [1, 0, 0])
+    out
+end
+
+def train_production(data) do
+    input = slice(data, 0, 2)
+    target = slice(data, 2, 1)
+
+    w = load_synaptic("debug_prod.w", 1, 2)
+    out = matmul(input, w)
+    mastery_update(w, input, out, target, [3, 1, 5])
+    out
+end
+
+def inspect_minimal() do
+    w = load_synaptic("debug.w", 1, 2)
+    mastery_state(w)
+end
+
+def inspect_production() do
+    w = load_synaptic("debug_prod.w", 1, 2)
+    mastery_state(w)
+end

@@ -9,16 +9,13 @@ keywords = ["ternary", "neural-network", "tiny-ml", "edge-ai", "cpu"]
 categories = ["science", "algorithms"]
 
 [dependencies]
-# Signal foundation — ternary signal types (PackedSignal, Signal, Polarity)
+# Signal foundation — ternary signal types (Signal, Polarity)
 ternary-signal = { path = "../ternary-signal" }
 
 # Runes scripting engine — replaces ternsig v1 assembly VM
 runes-core = { path = "../runes/runes-core" }
 runes-parser = { path = "../runes/runes-parser" }
 runes-eval = { path = "../runes/runes-eval" }
-
-# Persistence — thermal progression for synaptic strength history
-thermogram = { path = "../thermogram-rs" }
 
 # Distributed representational memory — signal-vector banks
 databank-rs = { path = "../databank-rs" }
@@ -37,6 +34,66 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "ant_bench"
 harness = false
+
+[[bin]]
+name = "classifier_mastery"
+path = "runners/classifier_mastery.rs"
+
+[[bin]]
+name = "compare_mastery"
+path = "runners/compare_mastery.rs"
+
+[[bin]]
+name = "diff_mastery"
+path = "runners/diff_mastery.rs"
+
+[[bin]]
+name = "gate_mastery"
+path = "runners/gate_mastery.rs"
+
+[[bin]]
+name = "merge_mastery"
+path = "runners/merge_mastery.rs"
+
+[[bin]]
+name = "thermal_classifier"
+path = "runners/thermal_classifier.rs"
+
+[[bin]]
+name = "debug_mastery"
+path = "runners/debug_mastery.rs"
+
+[[bin]]
+name = "composition_contains"
+path = "runners/composition_contains.rs"
+
+[[bin]]
+name = "composition_has_duplicate"
+path = "runners/composition_has_duplicate.rs"
+
+[[bin]]
+name = "composition_sudoku"
+path = "runners/composition_sudoku.rs"
+
+[[bin]]
+name = "multiplex_classify"
+path = "runners/multiplex_classify.rs"
+
+[[bin]]
+name = "adaptive_cascade"
+path = "runners/adaptive_cascade.rs"
+
+[[bin]]
+name = "sensor_anomaly"
+path = "runners/sensor_anomaly.rs"
+
+[[bin]]
+name = "persistence_lifecycle"
+path = "runners/persistence_lifecycle.rs"
+
+[[bin]]
+name = "pipeline_planning"
+path = "runners/pipeline_planning.rs"
 
 [features]
 default = []

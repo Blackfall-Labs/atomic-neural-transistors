@@ -1,20 +1,20 @@
-//! Mastery learning for PackedSignal weight matrices.
+//! Mastery learning for Signal synaptic strength matrices.
 //!
 //! Integer-only, pressure-based learning. No gradients.
 //! Ternary pressure transitions gated by participation and neuromodulation.
 
-use crate::core::weight_matrix::{packed_from_current, WeightMatrix};
+use crate::core::weight_matrix::WeightMatrix;
 use crate::neuromod::NeuromodState;
-use ternary_signal::PackedSignal;
+use ternary_signal::Signal;
 
 /// Configuration for mastery learning.
 #[derive(Clone, Debug)]
 pub struct MasteryConfig {
-    /// Pressure magnitude needed for a weight transition (default: 3).
+    /// Pressure magnitude needed for a transition (default: 3).
     pub pressure_threshold: i32,
     /// Pressure decay per learning step (default: 1).
     pub decay_rate: i32,
-    /// Minimum uses before learning applies to a weight (default: 5).
+    /// Minimum uses before learning applies (default: 5).
     pub participation_gate: u32,
 }
 
@@ -28,12 +28,12 @@ impl Default for MasteryConfig {
     }
 }
 
-/// Per-weight-matrix learning state.
+/// Per-matrix learning state.
 #[derive(Clone, Debug)]
 pub struct MasteryState {
-    /// Per-weight pressure accumulator.
+    /// Per-strength pressure accumulator.
     pub pressure: Vec<i32>,
-    /// Per-weight usage counter.
+    /// Per-strength usage counter.
     pub participation: Vec<u32>,
     /// Learning configuration.
     pub config: MasteryConfig,
@@ -44,7 +44,7 @@ pub struct MasteryState {
 }
 
 impl MasteryState {
-    /// Create new mastery state for a weight matrix of given size.
+    /// Create new mastery state for a matrix of given size.
     pub fn new(weight_count: usize, config: MasteryConfig) -> Self {
         Self {
             pressure: vec![0; weight_count],
@@ -56,35 +56,23 @@ impl MasteryState {
     }
 
     /// Run one mastery learning step.
-    ///
-    /// Production mastery algorithm from astromind-archive:
-    /// 1. Compute error signal: target - output (as current values)
-    /// 2. Activity-weighted participation: only top 25% of active inputs contribute
-    /// 3. Pressure accumulates from direction × activity_strength × error_magnitude
-    /// 4. Threshold gate: transition only when |pressure| >= threshold
-    /// 5. Weaken-before-flip: deplete magnitude to zero before polarity flip
     pub fn update(
         &mut self,
         weights: &mut WeightMatrix,
-        input: &[PackedSignal],
-        output: &[PackedSignal],
-        target: &[PackedSignal],
+        input: &[Signal],
+        output: &[Signal],
+        target: &[Signal],
     ) {
         self.update_gated(weights, input, output, target, None);
     }
 
     /// Run one mastery learning step with optional neuromodulator gating.
-    ///
-    /// When `neuromod` is provided:
-    /// - Plasticity gate: no learning if DA is below gate threshold
-    /// - Participation breadth: NE controls activity threshold divisor
-    ///   (high NE = broader participation, low NE = narrower)
     pub fn update_gated(
         &mut self,
         weights: &mut WeightMatrix,
-        input: &[PackedSignal],
-        output: &[PackedSignal],
-        target: &[PackedSignal],
+        input: &[Signal],
+        output: &[Signal],
+        target: &[Signal],
         neuromod: Option<&NeuromodState>,
     ) {
         assert_eq!(input.len(), weights.cols);
@@ -100,7 +88,6 @@ impl MasteryState {
 
         self.steps += 1;
 
-        // Compute activity threshold based on neuromodulator state
         let max_input = input.iter()
             .map(|s| s.current().unsigned_abs())
             .max()
@@ -119,12 +106,11 @@ impl MasteryState {
                 continue;
             }
 
-            let direction = error.signum() as i32; // +1 or -1
+            let direction = error.signum() as i32;
 
             for j in 0..weights.cols {
                 let w_idx = i * weights.cols + j;
                 let input_abs = input[j].current().unsigned_abs();
-                let input_sign = (input[j].current() as i64).signum() as i32;
 
                 // Record participation for any non-zero input
                 if input_abs > 0 {
@@ -141,7 +127,7 @@ impl MasteryState {
                     continue;
                 }
 
-                // Scale pressure by activity strength (production used ×15 scale)
+                // Scale pressure by activity strength
                 let activity_strength = ((input_abs - activity_threshold) as i64 * 15
                     / max_input as i64)
                     .max(1) as i32;
@@ -150,11 +136,12 @@ impl MasteryState {
                 let error_mag = ((error.abs().min(127) as i32) + 31) / 32;
 
                 // Pressure = direction × input_sign × activity_strength × error_mag
+                let input_sign = (input[j].current() as i64).signum() as i32;
                 self.pressure[w_idx] += direction * input_sign * activity_strength * error_mag;
 
                 // Threshold gate: transition when |pressure| >= threshold
                 if self.pressure[w_idx].abs() >= self.config.pressure_threshold {
-                    let needed_direction = self.pressure[w_idx].signum(); // +1 or -1
+                    let needed_direction = self.pressure[w_idx].signum();
                     apply_transition(&mut weights.data[w_idx], needed_direction, &mut self.transitions);
                     self.pressure[w_idx] = 0;
                 }
@@ -162,18 +149,13 @@ impl MasteryState {
         }
     }
 
-    /// Apply pressure decay to all weights.
-    /// Call once per training cycle (epoch), not per sample.
+    /// Apply pressure decay to all strengths.
+    /// Call once per cycle, not per sample.
     pub fn decay(&mut self) {
         self.decay_gated(None);
     }
 
     /// Apply pressure decay with optional neuromodulator gating.
-    ///
-    /// When `neuromod` is provided, 5HT controls decay rate:
-    /// - High 5HT (255) → 2× decay (harder to accumulate pressure)
-    /// - Neutral 5HT (128) → 1× decay (default behavior)
-    /// - Low 5HT (0) → 0× decay (pressure accumulates freely)
     pub fn decay_gated(&mut self, neuromod: Option<&NeuromodState>) {
         let multiplier = neuromod
             .map(|nm| nm.decay_multiplier())
@@ -190,72 +172,36 @@ impl MasteryState {
     }
 }
 
-/// Apply a weight transition using the weaken-before-flip pattern.
+/// Apply a transition using the weaken-before-flip pattern.
 ///
-/// Production rule from astromind-archive:
-/// 1. If polarity matches needed direction: strengthen (step magnitude up)
-/// 2. If polarity opposes needed direction: weaken first (step magnitude down)
-/// 3. Only flip polarity when magnitude is depleted to zero
-fn apply_transition(weight: &mut PackedSignal, needed_direction: i32, transitions: &mut u64) {
-    let current = weight.current();
+/// Works directly on Signal: step magnitude up/down, flip polarity only when depleted.
+fn apply_transition(signal: &mut Signal, needed_direction: i32, transitions: &mut u64) {
+    let current = signal.current();
     let current_sign = if current > 0 { 1 } else if current < 0 { -1 } else { 0 };
 
     if current_sign == needed_direction {
-        // Polarity matches: strengthen (step up in magnitude)
-        let stepped = step_up(current);
-        if stepped != current {
-            *weight = packed_from_current(stepped);
+        // Polarity matches: strengthen
+        let new_mag = signal.magnitude.saturating_add(1);
+        if new_mag != signal.magnitude {
+            signal.magnitude = new_mag;
+            if signal.multiplier == 0 { signal.multiplier = 1; }
             *transitions += 1;
         }
     } else if current_sign == -needed_direction {
-        // Polarity opposes: weaken first (step down toward zero)
-        let stepped = step_down(current);
-        *weight = packed_from_current(stepped);
-        *transitions += 1;
-        // Note: if stepped == 0, next transition will flip polarity
-    } else {
-        // Current is zero: set initial polarity in needed direction
-        let initial = if needed_direction > 0 { 1 } else { -1 };
-        *weight = packed_from_current(initial);
-        *transitions += 1;
-    }
-}
-
-/// Representable positive magnitudes in PackedSignal (sorted).
-/// These are all products of LOG_LUT[mc] * LOG_LUT[uc] where
-/// LOG_LUT = [0, 1, 4, 16, 32, 64, 128, 255].
-const REPR_LEVELS: &[i32] = &[
-    0, 1, 4, 16, 32, 64, 128, 255, 256, 512, 1020, 1024, 2048, 4080, 4096,
-    8160, 8192, 16320, 16384, 32640, 32768, 65025,
-];
-
-/// Step the current value UP to the next representable PackedSignal magnitude.
-fn step_up(current: i32) -> i32 {
-    let abs = current.unsigned_abs() as i32;
-    for &level in REPR_LEVELS {
-        if level > abs {
-            return if current >= 0 { level } else { -level };
+        // Polarity opposes: weaken first
+        let new_mag = signal.magnitude.saturating_sub(1);
+        signal.magnitude = new_mag;
+        if new_mag == 0 {
+            signal.polarity = 0;
+            signal.multiplier = 0;
         }
-    }
-    current // already at max
-}
-
-/// Step the current value DOWN to the previous representable PackedSignal magnitude.
-fn step_down(current: i32) -> i32 {
-    let abs = current.unsigned_abs() as i32;
-    let mut prev = 0i32;
-    for &level in REPR_LEVELS {
-        if level >= abs {
-            break;
-        }
-        prev = level;
-    }
-    if current > 0 {
-        prev
-    } else if current < 0 {
-        -prev
+        *transitions += 1;
     } else {
-        0
+        // Current is zero: set initial polarity
+        signal.polarity = if needed_direction > 0 { 1 } else { -1 };
+        signal.magnitude = 1;
+        signal.multiplier = 1;
+        *transitions += 1;
     }
 }
 
@@ -285,39 +231,36 @@ mod tests {
         let mut weights = WeightMatrix::zeros(1, 2);
         let mut state = MasteryState::new(2, MasteryConfig {
             pressure_threshold: 3,
-            decay_rate: 0, // no decay for testing
-            participation_gate: 0, // no gate for testing
+            decay_rate: 0,
+            participation_gate: 0,
         });
 
-        let input = vec![PackedSignal::pack(1, 32, 1), PackedSignal::pack(1, 32, 1)];
-        let output = vec![PackedSignal::ZERO];
-        let target = vec![PackedSignal::pack(1, 64, 1)];
+        let input = vec![Signal::new_raw(1, 32, 1), Signal::new_raw(1, 32, 1)];
+        let output = vec![Signal::ZERO];
+        let target = vec![Signal::new_raw(1, 64, 1)];
 
-        // First step: activity-weighted pressure fires immediately with strong input,
-        // causing transition. Either pressure accumulated or transition occurred.
         state.update(&mut weights, &input, &output, &target);
         assert_eq!(state.steps, 1);
         let has_pressure = state.pressure[0] > 0 || state.pressure[1] > 0;
         let has_transition = state.transitions > 0;
         assert!(has_pressure || has_transition,
-            "Expected pressure accumulation or weight transition");
+            "Expected pressure accumulation or transition");
     }
 
     #[test]
     fn test_weight_transitions() {
         let mut weights = WeightMatrix::zeros(1, 1);
         let mut state = MasteryState::new(1, MasteryConfig {
-            pressure_threshold: 1, // immediate transition
+            pressure_threshold: 1,
             decay_rate: 0,
             participation_gate: 0,
         });
 
-        let input = vec![PackedSignal::pack(1, 64, 1)];
-        let output = vec![PackedSignal::ZERO];
-        let target = vec![PackedSignal::pack(1, 128, 1)];
+        let input = vec![Signal::new_raw(1, 64, 1)];
+        let output = vec![Signal::ZERO];
+        let target = vec![Signal::new_raw(1, 128, 1)];
 
         state.update(&mut weights, &input, &output, &target);
-        // Weight should have transitioned from zero
         assert!(state.transitions > 0);
     }
 
@@ -327,20 +270,18 @@ mod tests {
         let mut state = MasteryState::new(1, MasteryConfig {
             pressure_threshold: 1,
             decay_rate: 0,
-            participation_gate: 10, // high gate
+            participation_gate: 10,
         });
 
-        let input = vec![PackedSignal::pack(1, 64, 1)];
-        let output = vec![PackedSignal::ZERO];
-        let target = vec![PackedSignal::pack(1, 128, 1)];
+        let input = vec![Signal::new_raw(1, 64, 1)];
+        let output = vec![Signal::ZERO];
+        let target = vec![Signal::new_raw(1, 128, 1)];
 
-        // Won't transition until participation >= 10
         for _ in 0..9 {
             state.update(&mut weights, &input, &output, &target);
         }
         assert_eq!(state.transitions, 0);
 
-        // 10th step should allow learning
         state.update(&mut weights, &input, &output, &target);
         assert!(state.transitions > 0);
     }

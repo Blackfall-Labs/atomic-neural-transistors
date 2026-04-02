@@ -1,0 +1,93 @@
+rune "cascade_features" do
+  version 1
+end
+use :ant_ml
+
+# Cascade features for adaptive 3-phase cascade demo.
+# Stage 1: specialization via product features.
+# Stage 2: verifier with hidden projection + learned output.
+
+def boosted_product(data) do
+    input = slice(data, 0, 32)
+    proto = slice(data, 32, 32)
+    raw = mul(input, proto)
+    shift(raw, 8)
+end
+
+def verifier_forward(input) do
+    w_hidden = load_synaptic_frozen("cascade.w_vhidden", 16, 32)
+    w_out = load_synaptic("cascade.w_vout", 4, 16)
+
+    h = matmul(input, w_hidden)
+    h = relu(h)
+    matmul(h, w_out)
+end
+
+def verifier_train(data) do
+    input = slice(data, 0, 32)
+    target = slice(data, 32, 4)
+
+    w_hidden = load_synaptic_frozen("cascade.w_vhidden", 16, 32)
+    w_out = load_synaptic("cascade.w_vout", 4, 16)
+
+    h = matmul(input, w_hidden)
+    h = relu(h)
+    out = matmul(h, w_out)
+    out_c = clamp(out, -127, 127)
+
+    mastery_update(w_out, h, out_c, target, [3, 1, 5])
+    argmax(out)
+end
+
+def verifier_predict(input) do
+    argmax(verifier_forward(input))
+end
+
+# Orchestration helpers
+def create_neuromod() do
+    neuromod_new()
+end
+
+def inject(handle, chem, amount) do
+    neuromod_inject(handle, chem, amount)
+end
+
+def tick(handle) do
+    neuromod_tick(handle)
+end
+
+def gate(handle) do
+    neuromod_gate(handle)
+end
+
+def read_chem(handle, chem) do
+    neuromod_read(handle, chem)
+end
+
+def create_predictor(dims, shift, threshold) do
+    predict_new(dims, shift, threshold)
+end
+
+def observe(handle, actual, target) do
+    predict_observe(handle, actual, target)
+end
+
+def observe_no_target(handle, actual) do
+    predict_observe(handle, actual)
+end
+
+def create_salience(n_sources, source_dim) do
+    salience_new(n_sources, source_dim)
+end
+
+def route(handle, outputs) do
+    salience_route(handle, outputs)
+end
+
+def join(a, b) do
+    concat(a, b)
+end
+
+def extract(arr, start, len) do
+    slice(arr, start, len)
+end

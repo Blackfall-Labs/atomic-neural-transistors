@@ -2,55 +2,56 @@
 
 ## Problem
 
-Current ANT weight matrices have two modes: frozen or fully plastic. There is no middle ground.
+Current ANT synaptic matrices have two modes: frozen or fully plastic. There is no middle ground.
 
-- **Frozen hidden + learned output**: Converges fast (79% train in 1 epoch) but random projections don't generalize. Cross-speaker phoneme detection hits 3-11% test accuracy. The frozen hidden layer can't discover input-invariant features because it never changes.
+- **Frozen hidden + learned output**: Converges fast (79% train in 1 cycle) but random projections don't generalize. Cross-speaker phoneme detection hits 3-11% test accuracy. The frozen hidden region can't discover input-invariant features because it never changes.
 
-- **Both layers learning**: Hidden layer thrashes — millions of transitions per epoch destroy train accuracy. Alternating freeze/unfreeze helps (test improves from 2% to 7%) but the unfreeze epochs are too violent. The output layer has to completely relearn against the new hidden representation each time.
+- **Both regions learning**: Hidden region thrashes — millions of transitions per cycle destroy train accuracy. Alternating freeze/unfreeze helps (test improves from 2% to 7%) but the unfreeze cycles are too violent. The output region has to completely relearn against the new hidden representation each time.
 
-The root cause: every weight in a matrix has the same plasticity. There is no way for individual weights that have proven useful across diverse inputs to resist change while weights that are still searching remain plastic.
+The root cause: every synaptic strength in a matrix has the same plasticity. There is no way for individual strengths that have proven useful across diverse inputs to resist change while strengths that are still searching remain plastic.
 
 ## Solution: Thermal Weights
 
-Each weight carries its own thermal state. Temperature controls how much a weight changes per mastery step.
+Each synaptic strength carries its own thermal state. Temperature controls how much a strength changes per mastery step.
 
 ```
-Per weight:
-  polarity:    i8    — excitatory (+1), inhibitory (-1), silent (0)
-  magnitude:   u8    — base intensity (LOG_LUT indexed)
-  multiplier:  u8    — contextual scaling (LOG_LUT indexed)
-  temperature: u8    — HOT (255) → COLD (0)
-  hits:        u16   — total reinforcement count
+Per synaptic strength:
+  polarity:    Polarity  — Excitatory (+1), Inhibitory (-1), Silent (0)
+  magnitude:   u8        — base intensity
+  multiplier:  u8        — contextual scaling
+  temperature: u8        — HOT (255) → COLD (0)
+  hits:        u16       — total reinforcement count
+  pressure:    i16       — accumulated mastery pressure
 ```
 
-6 bytes per weight. A 48×80 hidden layer = 3,840 weights = 23 KB.
+8 bytes per synaptic strength. A 48×80 hidden region = 3,840 strengths = 30 KB.
 
 ### Temperature Controls Plasticity
 
 | Temperature Range | State | Plasticity | Behavior |
 |-------------------|-------|------------|----------|
-| 192-255 | HOT | Full | Weight changes freely on every mastery step |
+| 192-255 | HOT | Full | Strength changes freely on every mastery step |
 | 128-191 | WARM | Reduced | Pressure threshold doubled — needs stronger evidence |
 | 64-127 | COOL | Low | Pressure threshold 4× — only strong consistent error moves it |
-| 0-63 | COLD | Frozen | Weight locked. No mastery updates. |
+| 0-63 | COLD | Frozen | Strength locked. No mastery updates. |
 
 ### Hits Drive Cooling
 
-Every time a weight participates in a correct detection, its hit count increments. Temperature drops as hits accumulate:
+Every time a synaptic strength participates in a correct detection, its hit count increments. Temperature drops as hits accumulate:
 
 ```
 new_temperature = max(0, temperature - (hits / cooling_rate))
 ```
 
-- `cooling_rate = 100`: a weight needs 100 hits to drop 1 temperature unit
-- A weight hit consistently across 32 speakers × 50 exposures = 1,600 hits → temperature drops by 16
+- `cooling_rate = 100`: a strength needs 100 hits to drop 1 temperature unit
+- A strength hit consistently across 32 speakers × 50 exposures = 1,600 hits → temperature drops by 16
 - After 25,500 hits (across many sessions) → fully COLD
 
-Hits only count when the ANT's detection was CORRECT. Wrong detections don't cool weights — they add pressure instead. A weight that participates in both correct and incorrect detections stays warm because hits and pressure pull in opposite directions.
+Hits only count when the ANT's detection was CORRECT. Wrong detections don't cool strengths — they add pressure instead. A strength that participates in both correct and incorrect detections stays warm because hits and pressure pull in opposite directions.
 
 ### Warming (Demotion)
 
-If a COOL or COLD weight consistently participates in wrong detections (pressure accumulates despite high threshold), it warms back up:
+If a COOL or COLD strength consistently participates in wrong detections (pressure accumulates despite high threshold), it warms back up:
 
 ```
 if accumulated_pressure > warming_threshold:
@@ -58,151 +59,101 @@ if accumulated_pressure > warming_threshold:
     pressure = 0
 ```
 
-This handles concept drift: a weight that was correct for training data but fails on new speakers heats back up and becomes plastic again.
-
-## .ant File Format
-
-Binary format. No JSON. No serde overhead.
-
-```
-Header (16 bytes):
-  magic:      [u8; 4]    — b"ANT\x01" (version 1)
-  n_layers:   u16        — number of weight matrices
-  n_weights:  u32        — total weight count across all layers
-  flags:      u16        — reserved
-  checksum:   u32        — CRC32 of weight data
-
-Per layer header (8 bytes):
-  rows:       u16
-  cols:       u16
-  reserved:   u32
-
-Per weight (6 bytes):
-  polarity:    i8
-  magnitude:   u8
-  multiplier:  u8
-  temperature: u8
-  hits:        u16 (little-endian)
-```
-
-A 2-layer detector (48×80 hidden + 1×48 output) = 3,888 weights = 23,328 bytes + 32 bytes headers = **~23 KB per ANT**.
-
-39 phoneme ANTs = ~900 KB total. Loads in microseconds.
-
-### Save/Load
-
-```rust
-// Save
-ant.save("phoneme_h.ant")?;
-
-// Load — weights, temperatures, hit counts all restored
-let ant = PhonemeDetector::load("phoneme_h.ant")?;
-
-// Inspect
-for (i, w) in ant.weights().enumerate() {
-    println!("{}: pol={} mag={} mul={} temp={} hits={}",
-        i, w.polarity, w.magnitude, w.multiplier, w.temperature, w.hits);
-}
-```
+This handles concept drift: a strength that was correct for mastery data but fails on new speakers heats back up and becomes plastic again.
 
 ## Three Initialization Strategies
 
 ### A) Grow From Nothing
 
-All weights start as zero/silent with temperature = HOT (255).
+All strengths start as zero/silent with temperature = HOT (255).
 
 ```
-polarity = 0, magnitude = 0, multiplier = 0, temperature = 255, hits = 0
+polarity = Zero, magnitude = 0, multiplier = 0, temperature = 255, hits = 0
 ```
 
-Structure emerges entirely from input. Only weights that receive consistent mastery pressure ever become non-zero. The ANT literally grows its own wiring from experience.
+Structure emerges entirely from input. Only strengths that receive consistent mastery pressure ever become non-zero. The ANT literally grows its own wiring from experience.
 
-**Pros**: No bias from initialization. Maximally sparse — only useful weights exist.
+**Pros**: No bias from initialization. Maximally sparse — only useful strengths exist.
 **Cons**: Slow to start. May never discover certain projections if pressure doesn't reach them.
 
 ### B) Random Pool
 
-All weights start with random polarity and low magnitude, temperature = HOT (255).
+All strengths start with random polarity and low magnitude, temperature = HOT (255).
 
 ```
-polarity = ±1 (random), magnitude = LUT[1..3], multiplier = 1, temperature = 255, hits = 0
+polarity = ±1 (random), magnitude = low, multiplier = 1, temperature = 255, hits = 0
 ```
 
-Everything is plastic. Weights that align with real signal patterns get reinforced and cool down. Weights that don't stay noisy, fail to accumulate hits, and eventually decay or get overwritten by pressure.
+Everything is plastic. Strengths that align with real signal patterns get reinforced and cool down. Strengths that don't stay noisy, fail to accumulate hits, and eventually decay or get overwritten by pressure.
 
 **Pros**: Many starting directions — more likely to find useful projections early.
 **Cons**: Initial noise means early detections are unreliable. More total transitions needed.
 
 ### C) Seeded With Structural Hints
 
-Weights initialized with domain-specific priors, but all at HOT temperature.
+Strengths initialized with domain-specific priors, but all at HOT temperature.
 
-For audio/phoneme detection: hidden layer weights seeded with filterbank band groupings — adjacent frequency bands get correlated initial weights, formant regions (300-3000Hz) get higher initial magnitude. The structure matches known spectral properties of speech.
+For audio/phoneme detection: hidden region strengths seeded with filterbank band groupings — adjacent frequency bands get correlated initial strengths, formant regions (300-3000Hz) get higher initial magnitude. The structure matches known spectral properties of speech.
 
 ```
-polarity = domain_hint, magnitude = LUT[2..4], multiplier = 1, temperature = 255, hits = 0
+polarity = domain_hint, magnitude = medium, multiplier = 1, temperature = 255, hits = 0
 ```
 
 **Pros**: Fastest convergence — starts near useful projections, mastery fine-tunes.
 **Cons**: Domain-specific. The hints might be wrong and need to be unlearned.
-**Key**: Everything is still HOT. The hints are suggestions, not constraints. If the data disagrees with the seeding, the weights will change. They just have a shorter path to the right answer if the hints are good.
+**Key**: Everything is still HOT. The hints are suggestions, not constraints. If the data disagrees with the seeding, the strengths will change. They just have a shorter path to the right answer if the hints are good.
 
 ## Integration With Existing ANT Architecture
 
-### WeightMatrix Upgrade
-
-Current `WeightMatrix` stores `Vec<PackedSignal>` — 1 byte per weight, no temperature, no hits.
-
-New `ThermalWeightMatrix` stores `Vec<ThermalWeight>` — 6 bytes per weight, full thermal state.
+### ThermalWeight
 
 ```rust
 pub struct ThermalWeight {
-    pub signal: PackedSignal,   // polarity × magnitude × multiplier (1 byte)
+    pub polarity: Polarity,     // ternary_signal::Polarity — enforced {-1, 0, +1}
+    pub magnitude: u8,          // base intensity
+    pub multiplier: u8,         // contextual scaling
     pub temperature: u8,        // 255=HOT → 0=COLD
     pub hits: u16,              // reinforcement count
-}
-
-pub struct ThermalWeightMatrix {
-    pub data: Vec<ThermalWeight>,
-    pub rows: usize,
-    pub cols: usize,
+    pub pressure: i16,          // accumulated mastery pressure
 }
 ```
 
+Uses `ternary_signal::Polarity` enum — not raw `i8`. Invalid states like `polarity = 2` are unrepresentable.
+
 ### Mastery Update Changes
 
-`MasteryState::update()` currently treats all weights equally. With thermal weights:
+`ThermalMasteryState::update()` operates on `Signal` inputs (not PackedSignal):
 
 1. Compute pressure as before (error × input_sign × activity_strength)
-2. Before applying transition: check weight temperature
+2. Before applying transition: check strength temperature
 3. Scale pressure threshold by temperature band:
    - HOT: threshold × 1 (normal)
    - WARM: threshold × 2
    - COOL: threshold × 4
    - COLD: skip entirely
-4. After correct detection: increment hits on participating weights
+4. After correct detection: increment hits on participating strengths
 5. Temperature update: `temp = max(0, temp - hits/cooling_rate)`
 
 ### Runes Integration
 
-The `load_synaptic` verb already loads weight matrices. Extend to support `.ant` files:
+The `load_synaptic` verb loads thermal synaptic matrices. Thermal state is invisible to the forward cascade — matmul uses signal values only. Mastery update respects thermal state automatically.
 
 ```rune
 # Loads ThermalWeightMatrix from .ant file
 w = load_synaptic("detector.w_hidden", 48, 80)
 
-# Thermal state is invisible to forward pass — matmul uses signal values only
+# Thermal state is invisible to forward cascade
 # Mastery update respects thermal state automatically
 ```
 
-No changes to .rune scripts. The thermal behavior is in the weight storage, not the computation.
+No changes to .rune scripts. The thermal behavior is in the synaptic storage, not the computation.
 
 ## Test Plan
 
 ### Unit Tests
 1. ThermalWeight creation, cooling, warming
-2. ThermalWeightMatrix matmul produces same results as WeightMatrix (thermal state doesn't affect forward pass)
-3. Mastery update respects temperature — COLD weights don't change
+2. ThermalWeightMatrix matmul produces same results regardless of thermal state (temperature doesn't affect cascade)
+3. Mastery update respects temperature — COLD strengths don't change
 4. Hit counting on correct detection
 5. .ant file save/load round-trip
 
@@ -216,83 +167,29 @@ No changes to .rune scripts. The thermal behavior is in the weight storage, not 
 2. 39 phoneme detector ANTs with ThermalWeightMatrix
 3. Curriculum: 10 → 25 → 50 → 100 words
 4. Gate: 80% test accuracy on held-out speakers to advance
-5. Track per-weight temperature distribution over epochs
+5. Track per-strength temperature distribution over cycles
 6. Compare A/B/C strategies
 
 ### Persistence Lifecycle
-1. Train session 1, save .ant files
-2. Load session 2, verify weights + temperatures + hits restored
-3. Continue training, verify COLD weights don't change
+1. Mastery session 1, save .ant files
+2. Load session 2, verify strengths + temperatures + hits restored
+3. Continue mastery, verify COLD strengths don't change
 4. Verify accuracy maintained or improved across sessions
 
-## Documentation: ANT Engineering Guide
+## Common Failure Modes
 
-Write a comprehensive guide covering everything learned about building, training, and deploying ANTs. This is the reference document for anyone — human or AI — working with atomic neural transistors going forward.
-
-### Topics to Cover
-
-**Signal Fundamentals**
-- Signal equation: s = p × m × k (polarity × magnitude × multiplier)
-- PackedSignal: 1-byte encoding, 3-bit magnitude + 3-bit multiplier + 2-bit polarity
-- LOG_LUT: [0, 1, 4, 16, 32, 64, 128, 255] — the 8 representable levels per component
-- 22 distinct representable positive magnitudes from m × k products
-- Integer-only arithmetic throughout — no floats, no rounding errors, deterministic
-
-**Weight Architecture**
-- Frozen hidden + learned output: when it works (structured/synthetic data), when it fails (cross-domain generalization)
-- Both layers learning: credit assignment without backprop, hidden target derivation
-- Thermal weights: per-weight plasticity gating, the upgrade path
-- Weight matrix sizing: hidden width vs input dimensionality tradeoffs
-
-**Mastery Learning**
-- Pressure accumulation: direction × input_sign × activity_strength × error_magnitude
-- Activity-weighted participation: only top 25% of active inputs contribute
-- Participation gate: N observations required before a weight can change
-- Pressure threshold: sustained evidence before any transition
-- Pressure decay: per-epoch, not per-sample — allows accumulation within a cycle
-- Weaken-before-flip: magnitude depletes to zero before polarity changes — prevents oscillation
-- Representable level stepping: step_up/step_down through REPR_LEVELS, not arbitrary amounts
-- Why it converges in 1-2 cycles on structured data (tiny state space, activity filtering, pressure hysteresis)
-
-**Neuromodulator Gating**
-- Dopamine: reward gate — DA below threshold means no learning happens
-- Norepinephrine: attention breadth — controls participation divisor (narrow vs broad)
-- Serotonin: stability — controls pressure decay rate (faster vs slower)
-- DA ↔ 5HT antagonism prevents saturation
-- All chemicals are integers (0-255), decay toward baseline (128)
-
-**Composition**
-- ANTs as transistors: one operation, composed into circuits
-- Composition without retraining: trained primitives combine algebraically
-- CompareANT → contains, has_duplicate, sudoku validation
-- Multi-ANT pipelines: ClassifierANT + CompareANT for planning
-
-**Common Failure Modes**
 - Random hidden projections don't generalize across domains (speaker variation, etc.)
-- Unfreezing both layers simultaneously: hidden thrashes, output can't keep up
-- Learning rate doesn't exist — but pressure_threshold and participation_gate serve the same role
+- Unfreezing both regions simultaneously: hidden thrashes, output can't keep up
 - Too-low participation gate: learns from noise
 - Too-high pressure threshold: never transitions
-- Not decaying pressure per epoch: pressure accumulates across epochs, causing delayed spurious transitions
+- Not decaying pressure per cycle: pressure accumulates across cycles, causing delayed spurious transitions
 
-**Testing Best Practices**
-- Always track train AND test accuracy per epoch — the gap tells you everything
-- Flat train accuracy = converged. Flat test accuracy = not generalizing.
-- Test accuracy climbing = the right features are being learned
-- Train high / test low = overfitting to training distribution
+## Testing Best Practices
+
+- Always track mastery AND evaluation accuracy per cycle — the gap tells you everything
+- Flat mastery accuracy = converged. Flat evaluation accuracy = not generalizing.
+- Evaluation accuracy climbing = the right features are being learned
+- Mastery high / evaluation low = overfitting to mastery distribution
 - Use curriculum: start small, prove it works, scale up
-- Gate advancement on TEST accuracy, not train
+- Gate advancement on EVALUATION accuracy, not mastery
 - Multiple sessions with persistence: verify accuracy carries over
-
-**Persistence**
-- Thermogram integration: delta-chained format with thermal progression
-- .ant file format: native binary, per-weight thermal state
-- Save after every epoch — crash recovery
-- Load and continue: verify no accuracy regression from save/load cycle
-
-**Real-World Deployment Lessons**
-- From hush-v3 phoneme detection: 39 parallel binary detectors outperform single multi-class
-- Emergent classification from competing detectors, not engineered architecture
-- Cross-speaker invariance requires learning, not random projections
-- Curriculum with same-data-many-speakers before expanding vocabulary
-- Per-weight cooling is the mechanism for consolidating cross-domain invariants

@@ -1,0 +1,38 @@
+rune "merge_train" do
+  version 1
+end
+use :ant_ml
+
+# MergeANT: fuse two 32-dim signals into one 32-dim output.
+# Frozen hidden 24x64 → ReLU → learned output 32x24
+
+def train(data) do
+    input = slice(data, 0, 64)
+    target = slice(data, 64, 32)
+
+    w_hidden = load_synaptic_frozen("merge.w_hidden", 24, 64)
+    w_out = load_synaptic("merge.w_out", 32, 24)
+
+    h = matmul(input, w_hidden)
+    h = relu(h)
+
+    out = matmul(h, w_out)
+    out_c = clamp(out, -127, 127)
+
+    mastery_update(w_out, h, out_c, target, [3, 1, 5])
+    out
+end
+
+def forward(input) do
+    w_hidden = load_synaptic_frozen("merge.w_hidden", 24, 64)
+    w_out = load_synaptic("merge.w_out", 32, 24)
+
+    h = matmul(input, w_hidden)
+    h = relu(h)
+    matmul(h, w_out)
+end
+
+def decay() do
+    w_out = load_synaptic("merge.w_out", 32, 24)
+    mastery_decay(w_out)
+end

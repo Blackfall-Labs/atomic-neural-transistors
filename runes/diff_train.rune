@@ -1,0 +1,31 @@
+rune "diff_train" do
+  version 1
+end
+use :ant_ml
+
+# DiffANT: change detector on 32-dim signal pairs.
+# Product features (a * b element-wise) → 1-dim output.
+# Changed → positive, unchanged → negative.
+
+def train(data) do
+    features = slice(data, 0, 32)
+    target = slice(data, 32, 1)
+
+    w_out = load_synaptic("diff.w_out", 1, 32)
+
+    out = matmul(features, w_out)
+    out_c = clamp(out, -127, 127)
+
+    mastery_update(w_out, features, out_c, target, [3, 1, 5])
+    out
+end
+
+def forward(features) do
+    w_out = load_synaptic("diff.w_out", 1, 32)
+    matmul(features, w_out)
+end
+
+def decay() do
+    w_out = load_synaptic("diff.w_out", 1, 32)
+    mastery_decay(w_out)
+end

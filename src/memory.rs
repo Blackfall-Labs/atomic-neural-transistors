@@ -16,7 +16,7 @@ use std::path::Path;
 use databank_rs::{
     BankCluster, BankConfig, BankId, DataBank, Edge, EdgeType, EntryId, QueryResult, Temperature,
 };
-use ternary_signal::PackedSignal;
+use ternary_signal::Signal;
 
 use crate::neuromod::{Chemical, NeuromodState};
 use crate::prediction::{PredictionEngine, SurpriseSignal};
@@ -91,7 +91,7 @@ impl MemoryANT {
     /// 3. No match → predictor observes → surprise?
     /// 4. Surprising + DA gate open → store the pattern
     /// 5. Inject DA for novelty
-    pub fn perceive(&mut self, signal: &[PackedSignal]) -> PerceptionResult {
+    pub fn perceive(&mut self, signal: &[Signal]) -> PerceptionResult {
         // Step 1: recall
         let best_match = self.recall_best(signal);
 
@@ -135,13 +135,13 @@ impl MemoryANT {
     }
 
     /// Force-store a pattern with explicit temperature.
-    pub fn store(&mut self, signal: &[PackedSignal], temperature: Temperature) -> Option<EntryId> {
+    pub fn store(&mut self, signal: &[Signal], temperature: Temperature) -> Option<EntryId> {
         let bank = self.cluster.get_mut(self.bank_id)?;
         bank.insert(signal.to_vec(), temperature, 0).ok()
     }
 
     /// Query without side effects — pure recall.
-    pub fn recall(&self, cue: &[PackedSignal], top_k: usize) -> Vec<QueryResult> {
+    pub fn recall(&self, cue: &[Signal], top_k: usize) -> Vec<QueryResult> {
         let bank = match self.cluster.get(self.bank_id) {
             Some(b) => b,
             None => return vec![],
@@ -237,7 +237,7 @@ impl MemoryANT {
 
     // ─── Internal ─────────────────────────────────────────────────────
 
-    fn recall_best(&self, signal: &[PackedSignal]) -> Option<QueryResult> {
+    fn recall_best(&self, signal: &[Signal]) -> Option<QueryResult> {
         let results = self.recall(signal, 1);
         results.into_iter().next()
     }
@@ -248,20 +248,20 @@ mod tests {
     use super::*;
     use crate::encoding::{accumulate, ENCODING_DIM};
 
-    fn make_pattern(values: &[i32]) -> Vec<PackedSignal> {
+    fn make_pattern(values: &[i32]) -> Vec<Signal> {
         values
             .iter()
             .map(|&v| {
                 if v == 0 {
-                    PackedSignal::ZERO
+                    Signal::ZERO
                 } else {
-                    PackedSignal::from_signal(&ternary_signal::Signal::from_current(v))
+                    Signal::from_current(v)
                 }
             })
             .collect()
     }
 
-    fn pattern_64(base: i32) -> Vec<PackedSignal> {
+    fn pattern_64(base: i32) -> Vec<Signal> {
         let mut vals = vec![0i32; 64];
         for i in 0..8 {
             vals[i] = base + (i as i32 * 10);
@@ -290,7 +290,7 @@ mod tests {
         mem.store(&full, Temperature::Hot).unwrap();
 
         // Partial cue: only first 4 dims active, rest zero
-        let mut cue = vec![PackedSignal::ZERO; ENCODING_DIM];
+        let mut cue = vec![Signal::ZERO; ENCODING_DIM];
         for i in 0..4 {
             cue[i] = full[i];
         }

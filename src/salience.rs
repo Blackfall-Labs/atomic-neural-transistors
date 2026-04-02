@@ -5,9 +5,9 @@
 //!
 //! From CROSS_ANT_ROUTING.md Option B: Gate-Based Fusion.
 
-use crate::core::weight_matrix::{packed_from_current, WeightMatrix};
+use crate::core::weight_matrix::WeightMatrix;
 use crate::learning::{MasteryConfig, MasteryState};
-use ternary_signal::PackedSignal;
+use ternary_signal::Signal;
 
 /// Routes and combines outputs from multiple parallel ANTs.
 #[derive(Debug, Clone)]
@@ -27,7 +27,7 @@ pub struct SalienceRouter {
 #[derive(Debug, Clone)]
 pub struct RouteResult {
     /// Combined output after gating.
-    pub output: Vec<PackedSignal>,
+    pub output: Vec<Signal>,
     /// Per-source confidence (output magnitude).
     pub confidences: Vec<i64>,
     /// Per-source gate values (0-255, from learned sigmoid gates).
@@ -72,7 +72,7 @@ impl SalienceRouter {
     ///
     /// `outputs` is a flat slice of length `n_sources * source_dim`, containing
     /// all ANT outputs concatenated in order.
-    pub fn route(&self, outputs: &[PackedSignal]) -> RouteResult {
+    pub fn route(&self, outputs: &[Signal]) -> RouteResult {
         assert_eq!(
             outputs.len(),
             self.n_sources * self.source_dim,
@@ -114,7 +114,7 @@ impl SalienceRouter {
             .any(|w| w.current() != 0);
 
         // Produce gated output
-        let mut output = vec![PackedSignal::ZERO; self.source_dim];
+        let mut output = vec![Signal::ZERO; self.source_dim];
 
         if gates_trained {
             // Gate-based fusion: scale each source by its gate value, sum
@@ -126,7 +126,7 @@ impl SalienceRouter {
                     // Scale by gate (0-255) then normalize by 255
                     let gated = src * gate / 255;
                     let existing = output[d].current() as i64;
-                    output[d] = packed_from_current((existing + gated).clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+                    output[d] = Signal::from_current((existing + gated).clamp(i32::MIN as i64, i32::MAX as i64) as i32);
                 }
             }
         } else {
@@ -150,9 +150,9 @@ impl SalienceRouter {
     /// `target` is the desired output (length = source_dim).
     pub fn train_route(
         &mut self,
-        outputs: &[PackedSignal],
-        _routed_output: &[PackedSignal],
-        target: &[PackedSignal],
+        outputs: &[Signal],
+        _routed_output: &[Signal],
+        target: &[Signal],
     ) {
         assert_eq!(outputs.len(), self.n_sources * self.source_dim);
 
@@ -173,12 +173,12 @@ impl SalienceRouter {
 
         // Build gate targets: low error = high gate (127), high error = low gate (-127)
         let max_err = source_errors.iter().copied().max().unwrap_or(1).max(1);
-        let gate_targets: Vec<PackedSignal> = source_errors
+        let gate_targets: Vec<Signal> = source_errors
             .iter()
             .map(|&err| {
                 // Invert: low error = positive gate, high error = negative
                 let normalized = 127 - (err * 254 / max_err) as i32;
-                packed_from_current(normalized)
+                Signal::from_current(normalized)
             })
             .collect();
 
@@ -218,10 +218,10 @@ fn integer_sigmoid(current: i32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::weight_matrix::packed_from_current;
+    use ternary_signal::Signal;
 
-    fn make_signals(values: &[i32]) -> Vec<PackedSignal> {
-        values.iter().map(|v| packed_from_current(*v)).collect()
+    fn make_signals(values: &[i32]) -> Vec<Signal> {
+        values.iter().map(|v| Signal::from_current(*v)).collect()
     }
 
     #[test]

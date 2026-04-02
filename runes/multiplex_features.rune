@@ -1,30 +1,32 @@
-rune "sensor_anomaly" do
+rune "multiplex_features" do
   version 1
 end
 use :ant_ml
 
-# ANT 1: Magnitude profiler — per-dim absolute value
-def magnitude_forward(input) do
-  abs(input)
+# Feature extractors for multiplex classification.
+# Each ANT extracts different features from the same input.
+
+# Product features: element-wise input × prototype, shifted to prevent overflow.
+def product_features(data) do
+    input = slice(data, 0, 32)
+    proto = slice(data, 32, 32)
+    raw = mul(input, proto)
+    shift(raw, 8)
 end
 
-# ANT 2: Delta detector — element-wise difference from previous tick
-def delta_forward(input, previous) do
-  sub(input, previous)
+# Projection features: frozen random projection + ReLU.
+def projection_features(input) do
+    w = load_synaptic_frozen("multiplex.w_proj", 32, 32)
+    h = matmul(input, w)
+    relu(h)
 end
 
-# ANT 3: Frequency analyzer — even/odd pair correlation + magnitude diff
-# First half: (even[k] * odd[k]) >> 8  (cross-correlation)
-# Second half: even[k] - odd[k]  (pair diff)
-def frequency_forward(input) do
-  evens = stride_slice(input, 0, 2)
-  odds = stride_slice(input, 1, 2)
-  pairs = shift(mul(evens, odds), 8)
-  diffs = sub(evens, odds)
-  concat(pairs, diffs)
+# Identity features: pass through with normalization.
+def identity_features(input) do
+    normalize(input)
 end
 
-# Orchestration helpers
+# Orchestration helpers — wrap module verbs as callable functions.
 def create_neuromod() do
     neuromod_new()
 end
@@ -61,10 +63,6 @@ def route(handle, outputs) do
     salience_route(handle, outputs)
 end
 
-def train_route(handle, outputs, routed, target) do
-    salience_train(handle, outputs, routed, target)
-end
-
 def read_chem(handle, chem) do
     neuromod_read(handle, chem)
 end
@@ -75,4 +73,8 @@ end
 
 def extract(arr, start, len) do
     slice(arr, start, len)
+end
+
+def train_route(handle, outputs, routed, target) do
+    salience_train(handle, outputs, routed, target)
 end

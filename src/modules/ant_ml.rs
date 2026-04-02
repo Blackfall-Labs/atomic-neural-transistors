@@ -6,7 +6,7 @@
 //! Usage in .rune scripts:
 //! ```rune
 //! use :ant_ml
-//! w = load_weights("weights/classifier_l1.ant")
+//! w = load_synaptic("classifier.w_in", 24, 32)
 //! h = matmul(input, w, 24, 32)
 //! h = relu(h)
 //! ```
@@ -18,11 +18,12 @@ use std::sync::{Arc, Mutex};
 use runes_core::error::RuneError;
 use runes_core::traits::{EvalContext, Module, ModuleVersion, Verb, VerbResult};
 use runes_core::value::Value;
-use ternary_signal::PackedSignal;
-use thermogram::{Delta, Signal, Thermogram};
+use ternary_signal::Signal;
 
-use crate::core::weight_matrix::{WeightMatrix, packed_from_current};
+use crate::core::weight_matrix::WeightMatrix;
+use crate::core::thermal::{ThermalWeightMatrix, ThermalMasteryConfig};
 use crate::learning::{MasteryConfig, MasteryState};
+use crate::thermal_mastery::ThermalMasteryState;
 
 use crate::neuromod::{Chemical, NeuromodState};
 use crate::prediction::PredictionEngine;
@@ -33,6 +34,7 @@ const HANDLE_WEIGHT_MATRIX: u32 = 1;
 const HANDLE_NEUROMOD: u32 = 2;
 const HANDLE_PREDICTOR: u32 = 3;
 const HANDLE_SALIENCE: u32 = 4;
+const HANDLE_THERMAL_MATRIX: u32 = 5;
 
 /// Runtime state shared between the ANT host and the Runes engine.
 pub struct AntRuntime {
@@ -40,8 +42,6 @@ pub struct AntRuntime {
     weights: HashMap<u64, WeightMatrix>,
     /// Mastery learning state keyed by handle ID.
     mastery: HashMap<u64, MasteryState>,
-    /// Thermogram for persistent synaptic strength history.
-    thermogram: Option<Thermogram>,
     /// Map from semantic key to handle ID (for load_synaptic deduplication).
     synaptic_keys: HashMap<String, u64>,
     /// Neuromodulator states keyed by handle ID.
@@ -50,6 +50,10 @@ pub struct AntRuntime {
     predictors: HashMap<u64, PredictionEngine>,
     /// Salience routers keyed by handle ID.
     salience: HashMap<u64, SalienceRouter>,
+    /// Thermal synaptic strength matrices keyed by handle ID.
+    thermal_weights: HashMap<u64, ThermalWeightMatrix>,
+    /// Thermal mastery learning state keyed by handle ID.
+    thermal_mastery: HashMap<u64, ThermalMasteryState>,
     /// Next handle ID.
     next_handle: u64,
     /// Base path for resolving relative weight file paths.
@@ -64,7 +68,8 @@ impl Default for AntRuntime {
             neuromods: HashMap::new(),
             predictors: HashMap::new(),
             salience: HashMap::new(),
-            thermogram: None,
+            thermal_weights: HashMap::new(),
+            thermal_mastery: HashMap::new(),
             synaptic_keys: HashMap::new(),
             next_handle: 0,
             base_path: None,
@@ -117,27 +122,6 @@ impl AntRuntime {
         self.weights.get_mut(&handle)
     }
 
-    /// Set the Thermogram for persistent synaptic strength storage.
-    pub fn with_thermogram(mut self, thermo: Thermogram) -> Self {
-        self.thermogram = Some(thermo);
-        self
-    }
-
-    /// Set a Thermogram on an already-constructed runtime.
-    pub fn set_thermogram(&mut self, thermo: Thermogram) {
-        self.thermogram = Some(thermo);
-    }
-
-    /// Get a reference to the Thermogram.
-    pub fn thermogram(&self) -> Option<&Thermogram> {
-        self.thermogram.as_ref()
-    }
-
-    /// Get a mutable reference to the Thermogram.
-    pub fn thermogram_mut(&mut self) -> Option<&mut Thermogram> {
-        self.thermogram.as_mut()
-    }
-
     /// Number of loaded synaptic strength matrices.
     pub fn weight_count(&self) -> usize {
         self.weights.len()
@@ -158,10 +142,7 @@ impl AntRuntime {
         &self.synaptic_keys
     }
 
-    /// Look up a weight matrix by its synaptic key (e.g. "c_parse.classify.w_hidden").
-    ///
-    /// Returns `None` if the key hasn't been loaded yet (call through the rune
-    /// interpreter first to create it).
+    /// Look up a weight matrix by its synaptic key.
     pub fn weights_by_key(&self, key: &str) -> Option<&WeightMatrix> {
         let handle = self.synaptic_keys.get(key)?;
         self.weights.get(handle)
@@ -174,10 +155,6 @@ impl AntRuntime {
     }
 
     /// Get or create a mastery state for a synaptic key.
-    ///
-    /// If the mastery state doesn't exist yet, it's created with the weight
-    /// matrix's dimensions and default config. Returns `None` if the synaptic
-    /// key doesn't exist.
     pub fn ensure_mastery_for_key(&mut self, key: &str) -> Option<(&mut MasteryState, &mut WeightMatrix)> {
         let handle = *self.synaptic_keys.get(key)?;
         let wm = self.weights.get(&handle)?;
@@ -185,7 +162,6 @@ impl AntRuntime {
         self.mastery.entry(handle).or_insert_with(|| {
             MasteryState::new(weight_count, MasteryConfig::default())
         });
-        // Re-borrow both mutably (safe because they're in different HashMaps)
         let mastery = self.mastery.get_mut(&handle).unwrap();
         let wm = self.weights.get_mut(&handle).unwrap();
         Some((mastery, wm))
@@ -209,21 +185,16 @@ impl AntMlModule {
                 Box::new(SoftmaxVerb),
                 Box::new(ArgmaxVerb),
                 Box::new(DotVerb),
-                Box::new(PackVerb),
-                Box::new(UnpackVerb),
+                Box::new(SignalVerb),
                 Box::new(MulVerb),
                 Box::new(AddVerb),
                 Box::new(ShiftVerb),
                 Box::new(SliceVerb),
-                Box::new(LoadWeightsVerb),
-                Box::new(SaveWeightsVerb),
                 Box::new(ZerosVerb),
                 Box::new(MasteryUpdateVerb),
                 Box::new(MasteryStateVerb),
                 Box::new(LoadSynapticVerb),
                 Box::new(LoadSynapticFrozenVerb),
-                Box::new(SaveSynapticVerb),
-                Box::new(PersistThermoVerb),
                 Box::new(NeuromodNewVerb),
                 Box::new(NeuromodInjectVerb),
                 Box::new(NeuromodTickVerb),
@@ -244,6 +215,16 @@ impl AntMlModule {
                 Box::new(NeuromodReadVerb),
                 // Stride verb
                 Box::new(StrideSliceVerb),
+                // Mastery utilities
+                Box::new(MasteryDecayVerb),
+                Box::new(ClampVerb),
+                Box::new(OnehotVerb),
+                // Thermal verbs
+                Box::new(ThermalLoadSynapticVerb),
+                Box::new(ThermalMatmulVerb),
+                Box::new(ThermalMasteryUpdateVerb),
+                Box::new(ThermalDecayVerb),
+                Box::new(ThermalSummaryVerb),
             ],
         }
     }
@@ -255,7 +236,7 @@ impl Module for AntMlModule {
     }
 
     fn version(&self) -> ModuleVersion {
-        ModuleVersion::new(0, 6, 0)
+        ModuleVersion::new(0, 7, 0)
     }
 
     fn verbs(&self) -> &[Box<dyn Verb>] {
@@ -279,11 +260,12 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Helper: convert between Value arrays and PackedSignal vectors
+// Helper: convert between Value arrays and Signal vectors
 // ---------------------------------------------------------------------------
 
-fn packed_to_values(signals: &[PackedSignal]) -> Value {
-    Value::Array(Arc::new(signals.iter().map(|s| Value::Integer(s.as_u8() as i64)).collect()))
+/// Convert Signal slice to Runes Value array (each signal → its current i32 value).
+fn signals_to_values(signals: &[Signal]) -> Value {
+    Value::Array(Arc::new(signals.iter().map(|s| Value::Integer(s.current() as i64)).collect()))
 }
 
 fn require_int(args: &[Value], idx: usize, name: &str, span: runes_core::Span) -> Result<i64, RuneError> {
@@ -300,12 +282,13 @@ fn require_str(args: &[Value], idx: usize, name: &str, span: runes_core::Span) -
     }
 }
 
-fn require_array(args: &[Value], idx: usize, name: &str, span: runes_core::Span) -> Result<Vec<PackedSignal>, RuneError> {
+/// Extract a Signal array from Runes Value. Each integer is interpreted as a current value.
+fn require_array(args: &[Value], idx: usize, name: &str, span: runes_core::Span) -> Result<Vec<Signal>, RuneError> {
     match args.get(idx) {
         Some(Value::Array(arr)) => {
             arr.iter()
                 .map(|v| match v {
-                    Value::Integer(n) => Ok(PackedSignal::from_raw(*n as u8)),
+                    Value::Integer(n) => Ok(Signal::from_current(*n as i32)),
                     _ => Err(RuneError::type_error(format!("{name}: array must contain integers"), Some(span))),
                 })
                 .collect()
@@ -326,7 +309,7 @@ fn require_handle(args: &[Value], idx: usize, name: &str, expected_type: u32, sp
 // Verb implementations
 // ---------------------------------------------------------------------------
 
-/// matmul(input, weights_handle, rows, cols) → Array
+/// matmul(input, weights_handle) → Array
 struct MatmulVerb;
 impl Verb for MatmulVerb {
     fn name(&self) -> &str { "matmul" }
@@ -339,7 +322,7 @@ impl Verb for MatmulVerb {
             let wm = rt.weights.get(&handle)
                 .ok_or_else(|| RuneError::argument("matmul: invalid weight handle", Some(span)))?;
             let output = wm.matmul(&input);
-            Ok(packed_to_values(&output))
+            Ok(signals_to_values(&output))
         })
     }
 }
@@ -351,20 +334,15 @@ impl Verb for ReluVerb {
     fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
         let span = ctx.span;
         let signals = require_array(args, 0, "relu", span)?;
-        let output: Vec<PackedSignal> = signals.iter().map(|s| {
-            if s.is_negative() {
-                PackedSignal::ZERO
-            } else {
-                *s
-            }
+        let output: Vec<Signal> = signals.iter().map(|s| {
+            if s.current() < 0 { Signal::ZERO } else { *s }
         }).collect();
-        Ok(packed_to_values(&output))
+        Ok(signals_to_values(&output))
     }
 }
 
 /// normalize(signals) → Array
 /// Scale all values so max magnitude = 127, preserving polarity.
-/// This prevents hidden layer outputs from overwhelming the output layer.
 struct NormalizeVerb;
 impl Verb for NormalizeVerb {
     fn name(&self) -> &str { "normalize" }
@@ -372,7 +350,7 @@ impl Verb for NormalizeVerb {
         let span = ctx.span;
         let signals = require_array(args, 0, "normalize", span)?;
         if signals.is_empty() {
-            return Ok(packed_to_values(&[]));
+            return Ok(signals_to_values(&[]));
         }
 
         let max_abs = signals.iter()
@@ -381,62 +359,57 @@ impl Verb for NormalizeVerb {
             .unwrap_or(1)
             .max(1) as i64;
 
-        let output: Vec<PackedSignal> = signals.iter().map(|s| {
+        let output: Vec<Signal> = signals.iter().map(|s| {
             let c = s.current() as i64;
             let scaled = (c * 127) / max_abs;
-            packed_from_current(scaled as i32)
+            Signal::from_current(scaled as i32)
         }).collect();
-        Ok(packed_to_values(&output))
+        Ok(signals_to_values(&output))
     }
 }
 
 /// sigmoid(signals) → Array
-/// Ternary sigmoid: threshold curve via LUT mapping magnitude to sigmoid-like response.
+/// Ternary sigmoid: threshold curve mapping to 0-255 range.
 struct SigmoidVerb;
 impl Verb for SigmoidVerb {
     fn name(&self) -> &str { "sigmoid" }
     fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
         let span = ctx.span;
         let signals = require_array(args, 0, "sigmoid", span)?;
-        // Sigmoid LUT: maps current magnitude to 0-255 range with S-curve
-        // For ternary signals, we threshold: large negative → 0, zero → 128, large positive → 255
-        let output: Vec<PackedSignal> = signals.iter().map(|s| {
+        let output: Vec<Signal> = signals.iter().map(|s| {
             let c = s.current();
             let sigmoid_val = ternary_sigmoid(c);
-            PackedSignal::pack(1, sigmoid_val, 1)
+            Signal::new_raw(1, sigmoid_val, 1)
         }).collect();
-        Ok(packed_to_values(&output))
+        Ok(signals_to_values(&output))
     }
 }
 
 /// Integer sigmoid approximation: maps i32 current to 0-255 output magnitude.
 fn ternary_sigmoid(current: i32) -> u8 {
-    // Piecewise linear approximation of sigmoid * 255
-    // Centered at 0, saturates at roughly ±512
     if current <= -512 {
         0
     } else if current >= 512 {
         255
     } else {
-        // Linear region: (current + 512) * 255 / 1024
         ((current as i64 + 512) * 255 / 1024) as u8
     }
 }
 
 /// tanh_act(signals) → Array
-/// Symmetric threshold via LUT.
+/// Symmetric threshold.
 struct TanhActVerb;
 impl Verb for TanhActVerb {
     fn name(&self) -> &str { "tanh_act" }
     fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
         let span = ctx.span;
         let signals = require_array(args, 0, "tanh_act", span)?;
-        let output: Vec<PackedSignal> = signals.iter().map(|s| {
+        let output: Vec<Signal> = signals.iter().map(|s| {
             let c = s.current();
             let (pol, mag) = ternary_tanh(c);
-            PackedSignal::pack(pol, mag, 1)
+            Signal::new_raw(pol, mag, 1)
         }).collect();
-        Ok(packed_to_values(&output))
+        Ok(signals_to_values(&output))
     }
 }
 
@@ -452,7 +425,7 @@ fn ternary_tanh(current: i32) -> (i8, u8) {
 }
 
 /// softmax(signals) → Array
-/// Ternary softmax: normalize magnitudes to sum=255, preserve polarity.
+/// Normalize magnitudes to sum=255, positive polarity.
 struct SoftmaxVerb;
 impl Verb for SoftmaxVerb {
     fn name(&self) -> &str { "softmax" }
@@ -460,26 +433,24 @@ impl Verb for SoftmaxVerb {
         let span = ctx.span;
         let signals = require_array(args, 0, "softmax", span)?;
         if signals.is_empty() {
-            return Ok(packed_to_values(&[]));
+            return Ok(signals_to_values(&[]));
         }
 
-        // Shift currents so min is 0, then normalize
         let currents: Vec<i32> = signals.iter().map(|s| s.current()).collect();
         let min_c = *currents.iter().min().unwrap();
         let shifted: Vec<u64> = currents.iter().map(|&c| (c as i64 - min_c as i64) as u64).collect();
         let total: u64 = shifted.iter().sum();
 
-        let output: Vec<PackedSignal> = if total == 0 {
-            // All equal: uniform distribution
+        let output: Vec<Signal> = if total == 0 {
             let uniform = (255 / signals.len() as u8).max(1);
-            signals.iter().map(|_| PackedSignal::pack(1, uniform, 1)).collect()
+            signals.iter().map(|_| Signal::new_raw(1, uniform, 1)).collect()
         } else {
             shifted.iter().map(|&s| {
                 let mag = ((s * 255) / total) as u8;
-                PackedSignal::pack(1, mag, 1)
+                Signal::new_raw(1, mag, 1)
             }).collect()
         };
-        Ok(packed_to_values(&output))
+        Ok(signals_to_values(&output))
     }
 }
 
@@ -518,7 +489,22 @@ impl Verb for DotVerb {
     }
 }
 
-/// mul(a, b) → Array — element-wise multiply, raw product (no normalization)
+/// signal(polarity, magnitude, multiplier) → Integer (current value)
+/// Construct a signal and return its current value for use in arrays.
+struct SignalVerb;
+impl Verb for SignalVerb {
+    fn name(&self) -> &str { "signal" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let pol = require_int(args, 0, "signal", span)? as i8;
+        let mag = require_int(args, 1, "signal", span)? as u8;
+        let mul = require_int(args, 2, "signal", span)? as u8;
+        let s = Signal::new_raw(pol, mag, mul);
+        Ok(Value::Integer(s.current() as i64))
+    }
+}
+
+/// mul(a, b) → Array — element-wise multiply
 struct MulVerb;
 impl Verb for MulVerb {
     fn name(&self) -> &str { "mul" }
@@ -529,13 +515,13 @@ impl Verb for MulVerb {
         if a.len() != b.len() {
             return Err(RuneError::argument("mul: arrays must have same length", Some(span)));
         }
-        let output: Vec<PackedSignal> = a.iter().zip(b.iter())
+        let output: Vec<Signal> = a.iter().zip(b.iter())
             .map(|(x, y)| {
                 let product = x.current() as i64 * y.current() as i64;
-                packed_from_current(product as i32)
+                Signal::from_current(product as i32)
             })
             .collect();
-        Ok(packed_to_values(&output))
+        Ok(signals_to_values(&output))
     }
 }
 
@@ -550,13 +536,13 @@ impl Verb for AddVerb {
         if a.len() != b.len() {
             return Err(RuneError::argument("add: arrays must have same length", Some(span)));
         }
-        let output: Vec<PackedSignal> = a.iter().zip(b.iter())
+        let output: Vec<Signal> = a.iter().zip(b.iter())
             .map(|(x, y)| {
                 let sum = x.current() as i64 + y.current() as i64;
-                packed_from_current(sum as i32)
+                Signal::from_current(sum as i32)
             })
             .collect();
-        Ok(packed_to_values(&output))
+        Ok(signals_to_values(&output))
     }
 }
 
@@ -568,13 +554,13 @@ impl Verb for ShiftVerb {
         let span = ctx.span;
         let signals = require_array(args, 0, "shift", span)?;
         let n = require_int(args, 1, "shift", span)? as u32;
-        let output: Vec<PackedSignal> = signals.iter()
+        let output: Vec<Signal> = signals.iter()
             .map(|s| {
                 let shifted = s.current() >> n;
-                packed_from_current(shifted)
+                Signal::from_current(shifted)
             })
             .collect();
-        Ok(packed_to_values(&output))
+        Ok(signals_to_values(&output))
     }
 }
 
@@ -593,79 +579,7 @@ impl Verb for SliceVerb {
                 Some(span),
             ));
         }
-        Ok(packed_to_values(&signals[start..start + len]))
-    }
-}
-
-/// pack(polarity, magnitude, multiplier) → Integer (PackedSignal byte)
-struct PackVerb;
-impl Verb for PackVerb {
-    fn name(&self) -> &str { "pack" }
-    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
-        let span = ctx.span;
-        let pol = require_int(args, 0, "pack", span)? as i8;
-        let mag = require_int(args, 1, "pack", span)? as u8;
-        let mul = require_int(args, 2, "pack", span)? as u8;
-        Ok(Value::Integer(PackedSignal::pack(pol, mag, mul).as_u8() as i64))
-    }
-}
-
-/// unpack(packed_byte) → Array [pol, mag, mul, current]
-struct UnpackVerb;
-impl Verb for UnpackVerb {
-    fn name(&self) -> &str { "unpack" }
-    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
-        let span = ctx.span;
-        let byte = require_int(args, 0, "unpack", span)? as u8;
-        let ps = PackedSignal::from_raw(byte);
-        Ok(Value::Array(Arc::new(vec![
-            Value::Integer(ps.polarity() as i64),
-            Value::Integer(ps.magnitude() as i64),
-            Value::Integer(ps.multiplier() as i64),
-            Value::Integer(ps.current() as i64),
-        ])))
-    }
-}
-
-/// load_weights(path) → Handle
-/// Deprecated: use load_synaptic instead.
-struct LoadWeightsVerb;
-impl Verb for LoadWeightsVerb {
-    fn name(&self) -> &str { "load_weights" }
-    #[allow(deprecated)]
-    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
-        let span = ctx.span;
-        let path_str = require_str(args, 0, "load_weights", span)?;
-
-        with_runtime(ctx, |rt| {
-            let resolved = rt.resolve_path(&path_str);
-            let wm = WeightMatrix::load(&resolved)
-                .map_err(|e| RuneError::argument(format!("load_weights: {e}"), Some(span)))?;
-            let id = rt.insert_weights(wm);
-            Ok(Value::Handle(runes_core::value::HandleType(HANDLE_WEIGHT_MATRIX), id))
-        })
-    }
-}
-
-/// save_weights(handle, path) → Nil
-/// Deprecated: use save_synaptic instead.
-struct SaveWeightsVerb;
-impl Verb for SaveWeightsVerb {
-    fn name(&self) -> &str { "save_weights" }
-    #[allow(deprecated)]
-    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
-        let span = ctx.span;
-        let handle = require_handle(args, 0, "save_weights", HANDLE_WEIGHT_MATRIX, span)?;
-        let path_str = require_str(args, 1, "save_weights", span)?;
-
-        with_runtime(ctx, |rt| {
-            let resolved = rt.resolve_path(&path_str);
-            let wm = rt.weights.get(&handle)
-                .ok_or_else(|| RuneError::argument("save_weights: invalid handle", Some(span)))?;
-            wm.save(&resolved)
-                .map_err(|e| RuneError::argument(format!("save_weights: {e}"), Some(span)))?;
-            Ok(Value::Nil)
-        })
+        Ok(signals_to_values(&signals[start..start + len]))
     }
 }
 
@@ -676,13 +590,12 @@ impl Verb for ZerosVerb {
     fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
         let span = ctx.span;
         let size = require_int(args, 0, "zeros", span)? as usize;
-        let arr: Vec<Value> = vec![Value::Integer(PackedSignal::ZERO.as_u8() as i64); size];
+        let arr: Vec<Value> = vec![Value::Integer(0); size];
         Ok(Value::Array(Arc::new(arr)))
     }
 }
 
 /// mastery_update(weights_handle, input, output, target, config_map) → Handle
-/// Runs one mastery learning step. If no mastery state exists for this handle, creates one.
 struct MasteryUpdateVerb;
 impl Verb for MasteryUpdateVerb {
     fn name(&self) -> &str { "mastery_update" }
@@ -693,7 +606,6 @@ impl Verb for MasteryUpdateVerb {
         let output = require_array(args, 2, "mastery_update", span)?;
         let target = require_array(args, 3, "mastery_update", span)?;
 
-        // Optional config from 5th arg as array [threshold, decay, gate]
         let config = if let Some(Value::Array(arr)) = args.get(4) {
             MasteryConfig {
                 pressure_threshold: arr.first().and_then(|v| v.as_integer()).unwrap_or(3) as i32,
@@ -741,12 +653,8 @@ impl Verb for MasteryStateVerb {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Thermogram persistence verbs
-// ---------------------------------------------------------------------------
-
 /// load_synaptic(key, rows, cols) → Handle
-/// Read synaptic strengths from Thermogram by semantic key. Self-inits zeros if not found.
+/// Create or retrieve a synaptic strength matrix by semantic key.
 struct LoadSynapticVerb;
 impl Verb for LoadSynapticVerb {
     fn name(&self) -> &str { "load_synaptic" }
@@ -762,22 +670,7 @@ impl Verb for LoadSynapticVerb {
                 return Ok(Value::Handle(runes_core::value::HandleType(HANDLE_WEIGHT_MATRIX), handle));
             }
 
-            // Try reading from Thermogram
-            let wm = if let Some(thermo) = &rt.thermogram {
-                if let Ok(Some(data)) = thermo.read(&key) {
-                    if data.len() == rows * cols {
-                        WeightMatrix::from_data(data, rows, cols)
-                            .unwrap_or_else(|| WeightMatrix::zeros(rows, cols))
-                    } else {
-                        WeightMatrix::zeros(rows, cols)
-                    }
-                } else {
-                    WeightMatrix::zeros(rows, cols)
-                }
-            } else {
-                WeightMatrix::zeros(rows, cols)
-            };
-
+            let wm = WeightMatrix::zeros(rows, cols);
             let id = rt.alloc_handle();
             rt.weights.insert(id, wm);
             rt.synaptic_keys.insert(key, id);
@@ -787,10 +680,7 @@ impl Verb for LoadSynapticVerb {
 }
 
 /// load_synaptic_frozen(key, rows, cols, seed) → Handle
-/// Create a frozen random projection matrix (±1 polarity, 20-40 magnitude).
-/// If the key already exists in Thermogram, loads from there instead.
-/// These matrices are NOT learned — they provide fixed random projections
-/// for the hidden layers per MASTERY.md.
+/// Create a frozen random projection matrix.
 struct LoadSynapticFrozenVerb;
 impl Verb for LoadSynapticFrozenVerb {
     fn name(&self) -> &str { "load_synaptic_frozen" }
@@ -806,73 +696,15 @@ impl Verb for LoadSynapticFrozenVerb {
         };
 
         with_runtime(ctx, |rt| {
-            // Dedup: if we already loaded this key, return existing handle
             if let Some(&handle) = rt.synaptic_keys.get(&key) {
                 return Ok(Value::Handle(runes_core::value::HandleType(HANDLE_WEIGHT_MATRIX), handle));
             }
 
-            // Try reading from Thermogram first
-            let wm = if let Some(thermo) = &rt.thermogram {
-                if let Ok(Some(data)) = thermo.read(&key) {
-                    if data.len() == rows * cols {
-                        WeightMatrix::from_data(data, rows, cols)
-                            .unwrap_or_else(|| WeightMatrix::random_frozen(rows, cols, seed))
-                    } else {
-                        WeightMatrix::random_frozen(rows, cols, seed)
-                    }
-                } else {
-                    WeightMatrix::random_frozen(rows, cols, seed)
-                }
-            } else {
-                WeightMatrix::random_frozen(rows, cols, seed)
-            };
-
+            let wm = WeightMatrix::random_frozen(rows, cols, seed);
             let id = rt.alloc_handle();
             rt.weights.insert(id, wm);
             rt.synaptic_keys.insert(key, id);
             Ok(Value::Handle(runes_core::value::HandleType(HANDLE_WEIGHT_MATRIX), id))
-        })
-    }
-}
-
-/// save_synaptic(handle, key) → Nil
-/// Write current synaptic strength matrix to Thermogram as an Update delta.
-struct SaveSynapticVerb;
-impl Verb for SaveSynapticVerb {
-    fn name(&self) -> &str { "save_synaptic" }
-    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
-        let span = ctx.span;
-        let handle = require_handle(args, 0, "save_synaptic", HANDLE_WEIGHT_MATRIX, span)?;
-        let key = require_str(args, 1, "save_synaptic", span)?;
-
-        with_runtime(ctx, |rt| {
-            let wm = rt.weights.get(&handle)
-                .ok_or_else(|| RuneError::argument("save_synaptic: invalid handle", Some(span)))?;
-
-            let data: Vec<PackedSignal> = wm.data.clone();
-
-            let thermo = rt.thermogram.as_mut()
-                .ok_or_else(|| RuneError::argument("save_synaptic: no thermogram attached", Some(span)))?;
-
-            let prev_hash = thermo.dirty_chain.head_hash.clone();
-
-            // Use Create if key doesn't exist yet, Update otherwise
-            let delta = if thermo.read(&key).ok().flatten().is_some() {
-                Delta::update(
-                    key,
-                    data,
-                    "mastery_update",
-                    Signal::positive(204), // ~0.8 strength
-                    prev_hash,
-                )
-            } else {
-                Delta::create(key, data, "load_synaptic")
-            };
-
-            thermo.apply_delta(delta)
-                .map_err(|e| RuneError::argument(format!("save_synaptic: {e}"), Some(span)))?;
-
-            Ok(Value::Nil)
         })
     }
 }
@@ -882,7 +714,6 @@ impl Verb for SaveSynapticVerb {
 // ---------------------------------------------------------------------------
 
 /// neuromod_new() → Handle
-/// Create a neutral neuromodulator state (all chemicals at baseline 128).
 struct NeuromodNewVerb;
 impl Verb for NeuromodNewVerb {
     fn name(&self) -> &str { "neuromod_new" }
@@ -896,7 +727,6 @@ impl Verb for NeuromodNewVerb {
 }
 
 /// neuromod_inject(handle, chemical_str, amount) → Nil
-/// Inject a signed chemical delta. chemical_str: "da", "ne", or "5ht".
 struct NeuromodInjectVerb;
 impl Verb for NeuromodInjectVerb {
     fn name(&self) -> &str { "neuromod_inject" }
@@ -926,7 +756,6 @@ impl Verb for NeuromodInjectVerb {
 }
 
 /// neuromod_tick(handle) → Nil
-/// Decay all chemicals toward baseline by 1.
 struct NeuromodTickVerb;
 impl Verb for NeuromodTickVerb {
     fn name(&self) -> &str { "neuromod_tick" }
@@ -944,7 +773,6 @@ impl Verb for NeuromodTickVerb {
 }
 
 /// neuromod_gate(handle) → Bool
-/// Check if dopamine gate is open (DA > gate threshold).
 struct NeuromodGateVerb;
 impl Verb for NeuromodGateVerb {
     fn name(&self) -> &str { "neuromod_gate" }
@@ -965,7 +793,6 @@ impl Verb for NeuromodGateVerb {
 // ---------------------------------------------------------------------------
 
 /// predict_new(dims, shift, threshold) → Handle
-/// Create a new prediction engine.
 struct PredictNewVerb;
 impl Verb for PredictNewVerb {
     fn name(&self) -> &str { "predict_new" }
@@ -983,8 +810,7 @@ impl Verb for PredictNewVerb {
     }
 }
 
-/// predict_observe(handle, actual) → Array [magnitude, is_surprising, direction]
-/// Observe actual output. Updates EMA and returns surprise info.
+/// predict_observe(handle, actual, [target]) → Array [magnitude, is_surprising, direction]
 struct PredictObserveVerb;
 impl Verb for PredictObserveVerb {
     fn name(&self) -> &str { "predict_observe" }
@@ -993,7 +819,6 @@ impl Verb for PredictObserveVerb {
         let handle = require_handle(args, 0, "predict_observe", HANDLE_PREDICTOR, span)?;
         let actual = require_array(args, 1, "predict_observe", span)?;
 
-        // Optional 3rd arg: target array for direction computation
         let target = if args.len() >= 3 {
             match &args[2] {
                 Value::Nil => None,
@@ -1017,32 +842,6 @@ impl Verb for PredictObserveVerb {
 }
 
 // ---------------------------------------------------------------------------
-// Thermogram persistence verbs
-// ---------------------------------------------------------------------------
-
-/// persist_thermo(path) → Nil
-/// Save the Thermogram to disk as a .thermo file.
-struct PersistThermoVerb;
-impl Verb for PersistThermoVerb {
-    fn name(&self) -> &str { "persist_thermo" }
-    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
-        let span = ctx.span;
-        let path_str = require_str(args, 0, "persist_thermo", span)?;
-
-        with_runtime(ctx, |rt| {
-            let resolved = rt.resolve_path(&path_str);
-            let thermo = rt.thermogram.as_ref()
-                .ok_or_else(|| RuneError::argument("persist_thermo: no thermogram attached", Some(span)))?;
-
-            thermo.save(&resolved)
-                .map_err(|e| RuneError::argument(format!("persist_thermo: {e}"), Some(span)))?;
-
-            Ok(Value::Nil)
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Utility verbs: sub, abs, negate, concat, sum
 // ---------------------------------------------------------------------------
 
@@ -1057,13 +856,13 @@ impl Verb for SubVerb {
         if a.len() != b.len() {
             return Err(RuneError::argument("sub: arrays must have same length", Some(span)));
         }
-        let output: Vec<PackedSignal> = a.iter().zip(b.iter())
+        let output: Vec<Signal> = a.iter().zip(b.iter())
             .map(|(x, y)| {
                 let diff = x.current() as i64 - y.current() as i64;
-                packed_from_current(diff as i32)
+                Signal::from_current(diff as i32)
             })
             .collect();
-        Ok(packed_to_values(&output))
+        Ok(signals_to_values(&output))
     }
 }
 
@@ -1074,10 +873,10 @@ impl Verb for AbsVerb {
     fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
         let span = ctx.span;
         let signals = require_array(args, 0, "abs", span)?;
-        let output: Vec<PackedSignal> = signals.iter()
-            .map(|s| packed_from_current(s.current().abs()))
+        let output: Vec<Signal> = signals.iter()
+            .map(|s| Signal::from_current(s.current().abs()))
             .collect();
-        Ok(packed_to_values(&output))
+        Ok(signals_to_values(&output))
     }
 }
 
@@ -1088,10 +887,10 @@ impl Verb for NegateVerb {
     fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
         let span = ctx.span;
         let signals = require_array(args, 0, "negate", span)?;
-        let output: Vec<PackedSignal> = signals.iter()
-            .map(|s| packed_from_current(-s.current()))
+        let output: Vec<Signal> = signals.iter()
+            .map(|s| Signal::from_current(-s.current()))
             .collect();
-        Ok(packed_to_values(&output))
+        Ok(signals_to_values(&output))
     }
 }
 
@@ -1105,7 +904,7 @@ impl Verb for ConcatVerb {
         let b = require_array(args, 1, "concat", span)?;
         let mut output = a;
         output.extend_from_slice(&b);
-        Ok(packed_to_values(&output))
+        Ok(signals_to_values(&output))
     }
 }
 
@@ -1145,7 +944,6 @@ impl Verb for SalienceNewVerb {
 }
 
 /// salience_route(handle, outputs) → Array
-/// Returns [routed_output..., confidence_0, ..., confidence_n, winner]
 struct SalienceRouteVerb;
 impl Verb for SalienceRouteVerb {
     fn name(&self) -> &str { "salience_route" }
@@ -1159,9 +957,8 @@ impl Verb for SalienceRouteVerb {
                 .ok_or_else(|| RuneError::argument("salience_route: invalid handle", Some(span)))?;
             let result = router.route(&outputs);
 
-            // Pack: [routed_output..., conf_0, ..., conf_n, winner]
             let mut values: Vec<Value> = result.output.iter()
-                .map(|s| Value::Integer(s.as_u8() as i64))
+                .map(|s| Value::Integer(s.current() as i64))
                 .collect();
             for c in &result.confidences {
                 values.push(Value::Integer(*c));
@@ -1193,12 +990,7 @@ impl Verb for SalienceTrainVerb {
     }
 }
 
-// ---------------------------------------------------------------------------
-// neuromod_read verb
-// ---------------------------------------------------------------------------
-
-/// stride_slice(signals, offset, stride) → Array — pick every stride-th element starting at offset
-/// E.g. stride_slice(arr, 0, 2) picks even indices, stride_slice(arr, 1, 2) picks odd indices.
+/// stride_slice(signals, offset, stride) → Array
 struct StrideSliceVerb;
 impl Verb for StrideSliceVerb {
     fn name(&self) -> &str { "stride_slice" }
@@ -1210,12 +1002,12 @@ impl Verb for StrideSliceVerb {
         if stride == 0 {
             return Err(RuneError::argument("stride_slice: stride must be > 0", Some(span)));
         }
-        let output: Vec<PackedSignal> = signals.iter()
+        let output: Vec<Signal> = signals.iter()
             .skip(offset)
             .step_by(stride)
             .cloned()
             .collect();
-        Ok(packed_to_values(&output))
+        Ok(signals_to_values(&output))
     }
 }
 
@@ -1241,6 +1033,210 @@ impl Verb for NeuromodReadVerb {
                 )),
             };
             Ok(Value::Integer(level as i64))
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mastery utility verbs
+// ---------------------------------------------------------------------------
+
+/// mastery_decay(w_handle) → Nil
+/// Apply per-cycle pressure decay on the MasteryState for a weight matrix.
+struct MasteryDecayVerb;
+impl Verb for MasteryDecayVerb {
+    fn name(&self) -> &str { "mastery_decay" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let handle = require_handle(args, 0, "mastery_decay", HANDLE_WEIGHT_MATRIX, span)?;
+
+        with_runtime(ctx, |rt| {
+            // No-op if no mastery state exists (e.g. frozen matrices)
+            if let Some(state) = rt.mastery.get_mut(&handle) {
+                state.decay();
+            }
+            Ok(Value::Nil)
+        })
+    }
+}
+
+/// clamp(signals, lo, hi) → Array
+/// Clamp each signal's current value to [lo, hi].
+struct ClampVerb;
+impl Verb for ClampVerb {
+    fn name(&self) -> &str { "clamp" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let signals = require_array(args, 0, "clamp", span)?;
+        let lo = require_int(args, 1, "clamp", span)? as i32;
+        let hi = require_int(args, 2, "clamp", span)? as i32;
+        let output: Vec<Signal> = signals.iter()
+            .map(|s| Signal::from_current(s.current().clamp(lo, hi)))
+            .collect();
+        Ok(signals_to_values(&output))
+    }
+}
+
+/// onehot(class_idx, n_classes, pos_mag, neg_mag) → Array
+/// Generate a one-hot target vector. class_idx gets +pos_mag, others get -neg_mag.
+struct OnehotVerb;
+impl Verb for OnehotVerb {
+    fn name(&self) -> &str { "onehot" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let class = require_int(args, 0, "onehot", span)? as usize;
+        let n_classes = require_int(args, 1, "onehot", span)? as usize;
+        let pos = require_int(args, 2, "onehot", span)? as i32;
+        let neg = require_int(args, 3, "onehot", span)? as i32;
+
+        let output: Vec<Signal> = (0..n_classes)
+            .map(|i| {
+                if i == class {
+                    Signal::from_current(pos)
+                } else {
+                    Signal::from_current(-neg)
+                }
+            })
+            .collect();
+        Ok(signals_to_values(&output))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Thermal verbs
+// ---------------------------------------------------------------------------
+
+/// thermal_load_synaptic(key, rows, cols) → Handle
+/// Create or retrieve a ThermalWeightMatrix by semantic key. Initializes as zeros (all HOT).
+struct ThermalLoadSynapticVerb;
+impl Verb for ThermalLoadSynapticVerb {
+    fn name(&self) -> &str { "thermal_load_synaptic" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let key = require_str(args, 0, "thermal_load_synaptic", span)?;
+        let rows = require_int(args, 1, "thermal_load_synaptic", span)? as usize;
+        let cols = require_int(args, 2, "thermal_load_synaptic", span)? as usize;
+
+        with_runtime(ctx, |rt| {
+            // Dedup by key
+            if let Some(&handle) = rt.synaptic_keys.get(&key) {
+                return Ok(Value::Handle(runes_core::value::HandleType(HANDLE_THERMAL_MATRIX), handle));
+            }
+
+            // Optional seed for random init (4th arg)
+            let twm = if args.len() > 3 {
+                let seed = require_int(args, 3, "thermal_load_synaptic", span)? as u64;
+                ThermalWeightMatrix::random_hot(rows, cols, seed)
+            } else {
+                ThermalWeightMatrix::zeros(rows, cols)
+            };
+
+            let id = rt.alloc_handle();
+            rt.thermal_weights.insert(id, twm);
+            rt.synaptic_keys.insert(key, id);
+            Ok(Value::Handle(runes_core::value::HandleType(HANDLE_THERMAL_MATRIX), id))
+        })
+    }
+}
+
+/// thermal_matmul(input, w_handle) → Array
+/// Matrix-vector multiply through a ThermalWeightMatrix (temperature doesn't affect computation).
+struct ThermalMatmulVerb;
+impl Verb for ThermalMatmulVerb {
+    fn name(&self) -> &str { "thermal_matmul" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let input = require_array(args, 0, "thermal_matmul", span)?;
+        let handle = require_handle(args, 1, "thermal_matmul", HANDLE_THERMAL_MATRIX, span)?;
+
+        with_runtime(ctx, |rt| {
+            let twm = rt.thermal_weights.get(&handle)
+                .ok_or_else(|| RuneError::argument("thermal_matmul: invalid handle", Some(span)))?;
+            let output = twm.matmul(&input);
+            Ok(signals_to_values(&output))
+        })
+    }
+}
+
+/// thermal_mastery_update(w_handle, input, output, target, correct, [config]) → Handle
+/// Run one thermal mastery learning step. Config is optional array [threshold, decay, gate, cooling, warming_step, warming_threshold].
+struct ThermalMasteryUpdateVerb;
+impl Verb for ThermalMasteryUpdateVerb {
+    fn name(&self) -> &str { "thermal_mastery_update" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let handle = require_handle(args, 0, "thermal_mastery_update", HANDLE_THERMAL_MATRIX, span)?;
+        let input = require_array(args, 1, "thermal_mastery_update", span)?;
+        let output = require_array(args, 2, "thermal_mastery_update", span)?;
+        let target = require_array(args, 3, "thermal_mastery_update", span)?;
+        let correct = require_int(args, 4, "thermal_mastery_update", span)? != 0;
+
+        let config = if let Some(Value::Array(arr)) = args.get(5) {
+            ThermalMasteryConfig {
+                pressure_threshold: arr.first().and_then(|v| v.as_integer()).unwrap_or(3) as i32,
+                decay_rate: arr.get(1).and_then(|v| v.as_integer()).unwrap_or(1) as i32,
+                participation_gate: arr.get(2).and_then(|v| v.as_integer()).unwrap_or(5) as u32,
+                cooling_rate: arr.get(3).and_then(|v| v.as_integer()).unwrap_or(100) as u16,
+                warming_step: arr.get(4).and_then(|v| v.as_integer()).unwrap_or(10) as u8,
+                warming_threshold: arr.get(5).and_then(|v| v.as_integer()).unwrap_or(20) as i32,
+            }
+        } else {
+            ThermalMasteryConfig::default()
+        };
+
+        with_runtime(ctx, |rt| {
+            let twm = rt.thermal_weights.get_mut(&handle)
+                .ok_or_else(|| RuneError::argument("thermal_mastery_update: invalid handle", Some(span)))?;
+
+            let state = rt.thermal_mastery.entry(handle).or_insert_with(|| {
+                ThermalMasteryState::new(config.clone())
+            });
+
+            state.update(twm, &input, &output, &target, correct);
+            Ok(Value::Handle(runes_core::value::HandleType(HANDLE_THERMAL_MATRIX), handle))
+        })
+    }
+}
+
+/// thermal_decay(w_handle) → Nil
+/// Apply per-cycle pressure decay with temperature-gated cooling on a ThermalWeightMatrix.
+struct ThermalDecayVerb;
+impl Verb for ThermalDecayVerb {
+    fn name(&self) -> &str { "thermal_decay" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let handle = require_handle(args, 0, "thermal_decay", HANDLE_THERMAL_MATRIX, span)?;
+
+        with_runtime(ctx, |rt| {
+            let twm = rt.thermal_weights.get_mut(&handle)
+                .ok_or_else(|| RuneError::argument("thermal_decay: invalid handle", Some(span)))?;
+            let state = rt.thermal_mastery.get(&handle)
+                .ok_or_else(|| RuneError::argument("thermal_decay: no mastery state for handle", Some(span)))?;
+            state.decay(twm);
+            Ok(Value::Nil)
+        })
+    }
+}
+
+/// thermal_summary(w_handle) → Array [hot, warm, cool, cold]
+/// Return the temperature band distribution for a ThermalWeightMatrix.
+struct ThermalSummaryVerb;
+impl Verb for ThermalSummaryVerb {
+    fn name(&self) -> &str { "thermal_summary" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let handle = require_handle(args, 0, "thermal_summary", HANDLE_THERMAL_MATRIX, span)?;
+
+        with_runtime(ctx, |rt| {
+            let twm = rt.thermal_weights.get(&handle)
+                .ok_or_else(|| RuneError::argument("thermal_summary: invalid handle", Some(span)))?;
+            let (h, w, c, d) = twm.temp_summary();
+            Ok(Value::Array(Arc::new(vec![
+                Value::Integer(h as i64),
+                Value::Integer(w as i64),
+                Value::Integer(c as i64),
+                Value::Integer(d as i64),
+            ])))
         })
     }
 }

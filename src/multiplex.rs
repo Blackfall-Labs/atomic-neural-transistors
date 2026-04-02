@@ -10,19 +10,19 @@
 //!    - Negative surprise → anti-pattern pressure (inverted targets)
 //! 5. Tick neuromod (decay toward baseline)
 
-use crate::core::weight_matrix::{packed_from_current, WeightMatrix};
+use crate::core::weight_matrix::WeightMatrix;
 use crate::learning::{MasteryConfig, MasteryState};
 use crate::neuromod::{Chemical, NeuromodState};
 use crate::prediction::{PredictionEngine, SurpriseSignal};
 use crate::salience::{RouteResult, SalienceRouter};
-use ternary_signal::PackedSignal;
+use ternary_signal::Signal;
 
 /// A slot holding one ANT's forward function and learnable output synaptic strengths.
 pub struct AntSlot {
     /// Human-readable name for this ANT.
     pub name: String,
     /// Forward function: takes input, returns output.
-    forward_fn: Box<dyn Fn(&[PackedSignal]) -> Vec<PackedSignal>>,
+    forward_fn: Box<dyn Fn(&[Signal]) -> Vec<Signal>>,
     /// Output synaptic strengths (learnable via mastery).
     pub w_out: WeightMatrix,
     /// Mastery state for the output synaptic strengths.
@@ -38,7 +38,7 @@ impl AntSlot {
     /// - `hidden_dim`: dimension of the hidden representation feeding the output layer
     pub fn new(
         name: impl Into<String>,
-        forward_fn: Box<dyn Fn(&[PackedSignal]) -> Vec<PackedSignal>>,
+        forward_fn: Box<dyn Fn(&[Signal]) -> Vec<Signal>>,
         output_dim: usize,
         hidden_dim: usize,
     ) -> Self {
@@ -63,7 +63,7 @@ impl AntSlot {
     /// (no additional output layer needed).
     pub fn with_passthrough(
         name: impl Into<String>,
-        forward_fn: Box<dyn Fn(&[PackedSignal]) -> Vec<PackedSignal>>,
+        forward_fn: Box<dyn Fn(&[Signal]) -> Vec<Signal>>,
     ) -> Self {
         Self {
             name: name.into(),
@@ -74,7 +74,7 @@ impl AntSlot {
     }
 
     /// Run this ANT's forward function.
-    pub fn forward(&self, input: &[PackedSignal]) -> Vec<PackedSignal> {
+    pub fn forward(&self, input: &[Signal]) -> Vec<Signal> {
         (self.forward_fn)(input)
     }
 }
@@ -83,7 +83,7 @@ impl AntSlot {
 #[derive(Debug, Clone)]
 pub struct MultiplexResult {
     /// Combined output after salience routing.
-    pub output: Vec<PackedSignal>,
+    pub output: Vec<Signal>,
     /// Surprise signal from prediction engine.
     pub surprise: SurpriseSignal,
     /// Routing result (confidences, gates, winner).
@@ -150,14 +150,14 @@ impl MultiplexEncoder {
     /// - `target`: if provided, enables surprise-gated learning
     pub fn process(
         &mut self,
-        input: &[PackedSignal],
-        target: Option<&[PackedSignal]>,
+        input: &[Signal],
+        target: Option<&[Signal]>,
     ) -> MultiplexResult {
         let n = self.slots.len();
         assert!(n > 0, "MultiplexEncoder has no slots — call add_slot() then finalize()");
 
         // Step 1: Forward all ANTs
-        let mut all_outputs: Vec<PackedSignal> = Vec::with_capacity(n * self.output_dim);
+        let mut all_outputs: Vec<Signal> = Vec::with_capacity(n * self.output_dim);
         for slot in &self.slots {
             let out = slot.forward(input);
             assert_eq!(
@@ -207,9 +207,9 @@ impl MultiplexEncoder {
                     -1 => {
                         // Negative surprise: output moved away from target.
                         // Anti-pattern: train with inverted target (learn what NOT to do).
-                        let anti_target: Vec<PackedSignal> = routed_output
+                        let anti_target: Vec<Signal> = routed_output
                             .iter()
-                            .map(|s| packed_from_current(-s.current()))
+                            .map(|s| Signal::from_current(-s.current()))
                             .collect();
                         self.router
                             .train_route(&all_outputs, &route.output, tgt);
@@ -218,7 +218,7 @@ impl MultiplexEncoder {
                         let winner = route.winner;
                         if self.slots[winner].w_out.rows > 0 {
                             let winner_start = winner * self.output_dim;
-                            let winner_out: Vec<PackedSignal> =
+                            let winner_out: Vec<Signal> =
                                 all_outputs[winner_start..winner_start + self.output_dim].to_vec();
                             let slot = &mut self.slots[winner];
                             slot.ms_out.update_gated(
@@ -273,18 +273,18 @@ impl MultiplexEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::weight_matrix::packed_from_current;
+    use ternary_signal::Signal;
 
-    fn make_signals(values: &[i32]) -> Vec<PackedSignal> {
-        values.iter().map(|v| packed_from_current(*v)).collect()
+    fn make_signals(values: &[i32]) -> Vec<Signal> {
+        values.iter().map(|v| Signal::from_current(*v)).collect()
     }
 
     /// Simple ANT that returns its input scaled.
-    fn scale_ant(scale: i32) -> Box<dyn Fn(&[PackedSignal]) -> Vec<PackedSignal>> {
-        Box::new(move |input: &[PackedSignal]| {
+    fn scale_ant(scale: i32) -> Box<dyn Fn(&[Signal]) -> Vec<Signal>> {
+        Box::new(move |input: &[Signal]| {
             input
                 .iter()
-                .map(|s| packed_from_current(s.current() * scale / 100))
+                .map(|s| Signal::from_current(s.current() * scale / 100))
                 .collect()
         })
     }

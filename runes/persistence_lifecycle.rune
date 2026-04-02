@@ -1,0 +1,39 @@
+rune "persistence_lifecycle" do
+  version 1
+end
+use :ant_ml
+
+# Persistence lifecycle: train, save, load, verify, continue.
+# Uses CompareANT architecture (same as compare_train.rune).
+
+def train(data) do
+    input = slice(data, 0, 64)
+    target = slice(data, 64, 1)
+
+    w_in = load_synaptic_frozen("persist.w_in", 16, 64)
+    w_hidden = load_synaptic_frozen("persist.w_hidden", 16, 16)
+    w_out = load_synaptic("persist.w_out", 1, 16)
+
+    h = matmul(input, w_in)
+    h = relu(h)
+    h = matmul(h, w_hidden)
+    h = relu(h)
+
+    out = matmul(h, w_out)
+    out_c = clamp(out, -127, 127)
+
+    mastery_update(w_out, h, out_c, target, [3, 1, 5])
+    out
+end
+
+def forward(input) do
+    w_in = load_synaptic_frozen("persist.w_in", 16, 64)
+    w_hidden = load_synaptic_frozen("persist.w_hidden", 16, 16)
+    w_out = load_synaptic("persist.w_out", 1, 16)
+
+    h = matmul(input, w_in)
+    h = relu(h)
+    h = matmul(h, w_hidden)
+    h = relu(h)
+    matmul(h, w_out)
+end

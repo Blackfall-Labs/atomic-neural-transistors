@@ -1,9 +1,10 @@
-//! Grid operations composed from ANT primitives
+//! Grid operations composed from ANT primitives.
 
 use super::traits::EqualityChecker;
+use ternary_signal::Signal;
 
-/// Check if two grids are equal cell-by-cell
-pub fn grids_equal<E: EqualityChecker>(checker: &E, a: &[Vec<u32>], b: &[Vec<u32>]) -> bool {
+/// Check if two grids are equal cell-by-cell.
+pub fn grids_equal<E: EqualityChecker>(checker: &E, a: &[Vec<Signal>], b: &[Vec<Signal>]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -15,8 +16,8 @@ pub fn grids_equal<E: EqualityChecker>(checker: &E, a: &[Vec<u32>], b: &[Vec<u32
     }
 
     for (row_a, row_b) in a.iter().zip(b.iter()) {
-        for (&va, &vb) in row_a.iter().zip(row_b.iter()) {
-            if checker.check_equal(va, vb) < 0.5 {
+        for (va, vb) in row_a.iter().zip(row_b.iter()) {
+            if checker.check_equal(va, vb) < 0 {
                 return false;
             }
         }
@@ -24,16 +25,16 @@ pub fn grids_equal<E: EqualityChecker>(checker: &E, a: &[Vec<u32>], b: &[Vec<u32
     true
 }
 
-/// Find all positions of a value in a grid
+/// Find all positions of a value in a grid.
 pub fn grid_find_value<E: EqualityChecker>(
     checker: &E,
-    grid: &[Vec<u32>],
-    value: u32,
+    grid: &[Vec<Signal>],
+    value: &Signal,
 ) -> Vec<(usize, usize)> {
     let mut positions = Vec::new();
     for (r, row) in grid.iter().enumerate() {
-        for (c, &cell) in row.iter().enumerate() {
-            if checker.check_equal(cell, value) > 0.5 {
+        for (c, cell) in row.iter().enumerate() {
+            if checker.check_equal(cell, value) > 0 {
                 positions.push((r, c));
             }
         }
@@ -41,22 +42,22 @@ pub fn grid_find_value<E: EqualityChecker>(
     positions
 }
 
-/// Count occurrences of a value in a grid
-pub fn grid_count_value<E: EqualityChecker>(checker: &E, grid: &[Vec<u32>], value: u32) -> usize {
+/// Count occurrences of a value in a grid.
+pub fn grid_count_value<E: EqualityChecker>(checker: &E, grid: &[Vec<Signal>], value: &Signal) -> usize {
     grid_find_value(checker, grid, value).len()
 }
 
-/// A connected region in a grid
+/// A connected region in a grid.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Region {
-    /// Positions (row, col) in this region
+    /// Positions (row, col) in this region.
     pub positions: Vec<(usize, usize)>,
-    /// The value of cells in this region
-    pub value: u32,
+    /// The current value of cells in this region.
+    pub value: i32,
 }
 
 impl Region {
-    /// Get bounding box: (min_row, min_col, max_row, max_col)
+    /// Get bounding box: (min_row, min_col, max_row, max_col).
     pub fn bounding_box(&self) -> (usize, usize, usize, usize) {
         if self.positions.is_empty() {
             return (0, 0, 0, 0);
@@ -68,20 +69,19 @@ impl Region {
         (min_r, min_c, max_r, max_c)
     }
 
-    /// Get dimensions (height, width)
+    /// Get dimensions (height, width).
     pub fn dimensions(&self) -> (usize, usize) {
         let (min_r, min_c, max_r, max_c) = self.bounding_box();
         (max_r - min_r + 1, max_c - min_c + 1)
     }
 
-    /// Number of cells in this region
+    /// Number of cells in this region.
     pub fn size(&self) -> usize {
         self.positions.len()
     }
 
-    /// Convert region to a grid with background fill
-    /// Returns a grid sized to the bounding box with the region's value at each position
-    pub fn as_grid(&self, background: u32) -> Vec<Vec<u32>> {
+    /// Convert region to a grid with background fill.
+    pub fn as_grid(&self, background: i32) -> Vec<Vec<Signal>> {
         if self.positions.is_empty() {
             return vec![];
         }
@@ -90,24 +90,22 @@ impl Region {
         let h = max_r - min_r + 1;
         let w = max_c - min_c + 1;
 
-        // Fill with background
-        let mut grid = vec![vec![background; w]; h];
+        let mut grid = vec![vec![Signal::from_current(background); w]; h];
 
-        // Place region cells
         for &(r, c) in &self.positions {
             let local_r = r - min_r;
             let local_c = c - min_c;
-            grid[local_r][local_c] = self.value;
+            grid[local_r][local_c] = Signal::from_current(self.value);
         }
 
         grid
     }
 }
 
-/// Find connected component using flood-fill
+/// Find connected component using flood-fill.
 pub fn find_connected_component<E: EqualityChecker>(
     checker: &E,
-    grid: &[Vec<u32>],
+    grid: &[Vec<Signal>],
     start_row: usize,
     start_col: usize,
     visited: &mut [Vec<bool>],
@@ -119,7 +117,7 @@ pub fn find_connected_component<E: EqualityChecker>(
         return Region { positions: vec![], value: 0 };
     }
 
-    let target = grid[start_row][start_col];
+    let target = &grid[start_row][start_col];
     let mut positions = Vec::new();
     let mut stack = vec![(start_row, start_col)];
 
@@ -127,28 +125,27 @@ pub fn find_connected_component<E: EqualityChecker>(
         if r >= h || c >= w || visited[r][c] {
             continue;
         }
-        if checker.check_equal(grid[r][c], target) < 0.5 {
+        if checker.check_equal(&grid[r][c], target) < 0 {
             continue;
         }
 
         visited[r][c] = true;
         positions.push((r, c));
 
-        // 4-connected neighbors
         if r > 0 { stack.push((r - 1, c)); }
         if r + 1 < h { stack.push((r + 1, c)); }
         if c > 0 { stack.push((r, c - 1)); }
         if c + 1 < w { stack.push((r, c + 1)); }
     }
 
-    Region { positions, value: target }
+    Region { positions, value: target.current() }
 }
 
-/// Find all distinct objects (non-background connected regions)
+/// Find all distinct objects (non-background connected regions).
 pub fn find_all_objects<E: EqualityChecker>(
     checker: &E,
-    grid: &[Vec<u32>],
-    background: u32,
+    grid: &[Vec<Signal>],
+    background: &Signal,
 ) -> Vec<Region> {
     let h = grid.len();
     let w = if h > 0 { grid[0].len() } else { 0 };
@@ -160,7 +157,7 @@ pub fn find_all_objects<E: EqualityChecker>(
             if visited[r][c] {
                 continue;
             }
-            if checker.check_equal(grid[r][c], background) > 0.5 {
+            if checker.check_equal(&grid[r][c], background) > 0 {
                 visited[r][c] = true;
                 continue;
             }
@@ -179,12 +176,16 @@ mod tests {
     use super::*;
     use crate::composition::PerfectEquality;
 
+    fn sig(val: i32) -> Signal {
+        Signal::from_current(val)
+    }
+
     #[test]
     fn test_grids_equal() {
         let checker = PerfectEquality;
-        let a = vec![vec![1, 2], vec![3, 4]];
-        let b = vec![vec![1, 2], vec![3, 4]];
-        let c = vec![vec![1, 2], vec![3, 5]];
+        let a = vec![vec![sig(1), sig(2)], vec![sig(3), sig(4)]];
+        let b = vec![vec![sig(1), sig(2)], vec![sig(3), sig(4)]];
+        let c = vec![vec![sig(1), sig(2)], vec![sig(3), sig(5)]];
 
         assert!(grids_equal(&checker, &a, &b));
         assert!(!grids_equal(&checker, &a, &c));
@@ -194,12 +195,12 @@ mod tests {
     fn test_find_all_objects() {
         let checker = PerfectEquality;
         let grid = vec![
-            vec![1, 1, 0, 2, 2],
-            vec![1, 0, 0, 0, 2],
-            vec![0, 0, 3, 0, 0],
+            vec![sig(1), sig(1), sig(0), sig(2), sig(2)],
+            vec![sig(1), sig(0), sig(0), sig(0), sig(2)],
+            vec![sig(0), sig(0), sig(3), sig(0), sig(0)],
         ];
 
-        let objects = find_all_objects(&checker, &grid, 0);
+        let objects = find_all_objects(&checker, &grid, &sig(0));
         assert_eq!(objects.len(), 3);
     }
 }

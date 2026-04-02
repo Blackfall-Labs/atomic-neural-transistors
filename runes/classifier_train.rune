@@ -1,0 +1,40 @@
+rune "classifier_train" do
+  version 1
+end
+use :ant_ml
+
+def train(data) do
+    input = slice(data, 0, 32)
+    target_class = slice(data, 32, 1)
+
+    w_hidden = load_synaptic_frozen("classifier.w_hidden", 24, 32)
+    w_out = load_synaptic("classifier.w_out", 4, 24)
+
+    h = matmul(input, w_hidden)
+    h = relu(h)
+
+    out = matmul(h, w_out)
+    target = onehot(argmax(target_class), 4, 127, 127)
+    out_c = clamp(out, -127, 127)
+
+    mastery_update(w_out, h, out_c, target, [3, 1, 5])
+    argmax(out)
+end
+
+def forward(input) do
+    w_hidden = load_synaptic_frozen("classifier.w_hidden", 24, 32)
+    w_out = load_synaptic("classifier.w_out", 4, 24)
+
+    h = matmul(input, w_hidden)
+    h = relu(h)
+    matmul(h, w_out)
+end
+
+def predict(input) do
+    argmax(forward(input))
+end
+
+def decay() do
+    w_out = load_synaptic("classifier.w_out", 4, 24)
+    mastery_decay(w_out)
+end

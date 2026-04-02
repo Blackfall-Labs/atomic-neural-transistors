@@ -6,10 +6,10 @@
 //! ## Core Usage
 //!
 //! ```rust,ignore
-//! use atomic_neural_transistors::{ClassifierANT, PackedSignal};
+//! use atomic_neural_transistors::{ClassifierANT, Signal};
 //!
 //! let mut classifier = ClassifierANT::new()?;
-//! let input: Vec<PackedSignal> = vec![PackedSignal::pack(1, 128, 1); 32];
+//! let input: Vec<Signal> = vec![Signal::new_raw(1, 128, 1); 32];
 //! let output = classifier.classify(&input)?;
 //! ```
 //!
@@ -38,13 +38,14 @@ pub mod multiplex;
 pub mod neuromod;
 pub mod prediction;
 pub mod salience;
+pub mod testdata;
 mod weights_init;
 
 pub use core::{AtomicNeuralTransistor, WeightMatrix, ThermalWeight, ThermalWeightMatrix, ThermalMasteryConfig};
 pub use error::{AntError, Result};
 pub use ants::{ClassifierANT, CompareANT, DiffANT, GateANT, MergeANT};
 pub use modules::ant_ml::{AntMlModule, AntRuntime};
-pub use ternary_signal::PackedSignal;
+pub use ternary_signal::Signal;
 pub use neuromod::{Chemical, NeuromodState};
 pub use prediction::{PredictionEngine, SurpriseSignal};
 pub use salience::{SalienceRouter, RouteResult};

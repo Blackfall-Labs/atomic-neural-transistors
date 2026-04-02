@@ -10,7 +10,7 @@
 //!
 //! From astromind-archive: prediction error drives ignition, not confidence.
 
-use crate::PackedSignal;
+use crate::Signal;
 
 /// Result of observing an actual output against prediction.
 #[derive(Debug, Clone)]
@@ -78,8 +78,8 @@ impl PredictionEngine {
     /// toward (+1) or away from (-1) the target relative to prediction.
     pub fn observe(
         &mut self,
-        actual: &[PackedSignal],
-        target: Option<&[PackedSignal]>,
+        actual: &[Signal],
+        target: Option<&[Signal]>,
     ) -> SurpriseSignal {
         let dims = self.ema.len().min(actual.len());
         let mut per_dim_error = Vec::with_capacity(dims);
@@ -144,10 +144,10 @@ impl PredictionEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::weight_matrix::packed_from_current;
+    use ternary_signal::Signal;
 
-    fn make_signals(values: &[i32]) -> Vec<PackedSignal> {
-        values.iter().map(|v| packed_from_current(*v)).collect()
+    fn make_signals(values: &[i32]) -> Vec<Signal> {
+        values.iter().map(|v| Signal::from_current(*v)).collect()
     }
 
     #[test]
@@ -227,7 +227,6 @@ mod tests {
             pred.observe(&sig, None);
         }
         // EMA should be close to 100 after many observations
-        // PackedSignal quantization means 100 encodes as a nearby representable value
         assert!((pred.predict()[0] - 100).abs() < 30, "EMA should converge near 100, got {}", pred.predict()[0]);
     }
 }

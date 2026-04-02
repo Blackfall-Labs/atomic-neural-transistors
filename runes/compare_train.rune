@@ -37,3 +37,12 @@ def forward(input) do
 
     matmul(h, w_out, 1, 16)
 end
+
+def decay() do
+    w_in = load_synaptic("compare.w_in", 16, 64)
+    w_hidden = load_synaptic("compare.w_hidden", 16, 16)
+    w_out = load_synaptic("compare.w_out", 1, 16)
+    mastery_decay(w_in)
+    mastery_decay(w_hidden)
+    mastery_decay(w_out)
+end

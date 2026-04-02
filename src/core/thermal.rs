@@ -1,36 +1,13 @@
 //! Thermal weights — per-weight plasticity gating.
 //!
-//! Each weight carries its own temperature. HOT weights change freely,
-//! COLD weights are locked. Hits (correct participations) cool weights down.
-//! Consistent reinforcement across diverse inputs → weight locks in.
-//! Inconsistent performance → weight stays hot and keeps searching.
+//! Each synaptic strength carries its own temperature. HOT strengths change freely,
+//! COLD strengths are locked. Hits (correct participations) cool strengths down.
+//! Consistent reinforcement across diverse inputs → strength locks in.
+//! Inconsistent performance → strength stays hot and keeps searching.
 //!
-//! ## Format
-//!
-//! Per weight: 6 bytes
-//!   signal:      PackedSignal (1 byte) — s = p × m × k
-//!   temperature: u8 — 255=HOT → 0=COLD
-//!   hits:        u16 (LE) — reinforcement count
-//!   pressure:    i16 (LE) — accumulated mastery pressure
-//!
-//! ## .ant v2 binary format
-//!
-//! ```text
-//! Header (16 bytes):
-//!   magic:     [u8; 4] = b"ANT\x02"
-//!   n_layers:  u16 (LE)
-//!   flags:     u16 (LE) — reserved
-//!   checksum:  u32 (LE) — CRC32 of all layer data
-//!   reserved:  u32
-//!
-//! Per layer (8 bytes header + 6 bytes × rows × cols):
-//!   rows:      u16 (LE)
-//!   cols:      u16 (LE)
-//!   reserved:  u32
-//!   weights:   [ThermalWeight; rows × cols]
-//! ```
+//! See ANT_FORMAT.md for the .ant v3 binary format specification.
 
-use ternary_signal::PackedSignal;
+use ternary_signal::{Polarity, Signal};
 
 /// Temperature band thresholds.
 pub const TEMP_HOT: u8 = 192;
@@ -38,12 +15,17 @@ pub const TEMP_WARM: u8 = 128;
 pub const TEMP_COOL: u8 = 64;
 // Below TEMP_COOL = COLD
 
-/// A single weight with thermal state.
+/// A single synaptic strength with thermal state.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct ThermalWeight {
-    /// The signal value: s = p × m × k.
-    pub signal: PackedSignal,
+    /// Polarity: excitatory (+1), inhibitory (-1), silent (0).
+    /// Uses ternary_signal::Polarity to enforce valid values.
+    pub polarity: Polarity,
+    /// Magnitude: base intensity (0-255).
+    pub magnitude: u8,
+    /// Multiplier: contextual scaling (0-255).
+    pub multiplier: u8,
     /// Temperature: 255 = HOT (fully plastic) → 0 = COLD (frozen).
     pub temperature: u8,
     /// Hit count: incremented on correct participation.
@@ -53,23 +35,56 @@ pub struct ThermalWeight {
 }
 
 impl ThermalWeight {
-    /// Zero weight, fully hot, no history.
+    /// Zero strength, fully hot, no history.
     pub const ZERO_HOT: Self = Self {
-        signal: PackedSignal::ZERO,
+        polarity: Polarity::Zero,
+        magnitude: 0,
+        multiplier: 0,
         temperature: 255,
         hits: 0,
         pressure: 0,
     };
 
-    /// Create from a PackedSignal at full temperature.
-    pub fn hot(signal: PackedSignal) -> Self {
-        Self { signal, temperature: 255, hits: 0, pressure: 0 }
+    /// Create from a Signal at full temperature.
+    pub fn hot(signal: Signal) -> Self {
+        Self {
+            polarity: Polarity::from_i8_clamped(signal.polarity),
+            magnitude: signal.magnitude,
+            multiplier: signal.multiplier,
+            temperature: 255,
+            hits: 0,
+            pressure: 0,
+        }
     }
 
-    /// Is this weight frozen?
+    /// Create from components at full temperature.
+    pub fn hot_from(polarity: Polarity, magnitude: u8, multiplier: u8) -> Self {
+        Self {
+            polarity,
+            magnitude,
+            multiplier,
+            temperature: 255,
+            hits: 0,
+            pressure: 0,
+        }
+    }
+
+    /// Get the signal value as a Signal.
+    pub fn signal(&self) -> Signal {
+        Signal::new_raw(self.polarity.as_i8(), self.magnitude, self.multiplier)
+    }
+
+    /// Compute the current value: polarity × magnitude × multiplier.
+    pub fn current(&self) -> i32 {
+        self.polarity.as_i8() as i32
+            * self.magnitude as i32
+            * self.multiplier as i32
+    }
+
+    /// Is this strength frozen?
     pub fn is_cold(&self) -> bool { self.temperature < TEMP_COOL }
 
-    /// Is this weight fully plastic?
+    /// Is this strength fully plastic?
     pub fn is_hot(&self) -> bool { self.temperature >= TEMP_HOT }
 
     /// Temperature band name.
@@ -89,7 +104,7 @@ impl ThermalWeight {
         else { 0 } // COLD = no transitions
     }
 
-    /// Record a correct participation. Cools the weight.
+    /// Record a correct participation. Cools the strength.
     pub fn hit(&mut self, cooling_rate: u16) {
         self.hits = self.hits.saturating_add(1);
         if cooling_rate > 0 && self.hits % cooling_rate == 0 && self.temperature > 0 {
@@ -102,20 +117,29 @@ impl ThermalWeight {
         self.temperature = self.temperature.saturating_add(amount);
     }
 
-    /// Serialize to 6 bytes.
-    pub fn to_bytes(&self) -> [u8; 6] {
+    /// Serialize to 8 bytes (v3 format).
+    pub fn to_bytes(&self) -> [u8; 8] {
         let hits = self.hits.to_le_bytes();
         let pressure = self.pressure.to_le_bytes();
-        [self.signal.as_u8(), self.temperature, hits[0], hits[1], pressure[0], pressure[1]]
+        [
+            self.polarity.as_i8() as u8,
+            self.magnitude,
+            self.multiplier,
+            self.temperature,
+            hits[0], hits[1],
+            pressure[0], pressure[1],
+        ]
     }
 
-    /// Deserialize from 6 bytes.
-    pub fn from_bytes(b: &[u8; 6]) -> Self {
+    /// Deserialize from 8 bytes (v3 format).
+    pub fn from_bytes(b: &[u8; 8]) -> Self {
         Self {
-            signal: PackedSignal::from_raw(b[0]),
-            temperature: b[1],
-            hits: u16::from_le_bytes([b[2], b[3]]),
-            pressure: i16::from_le_bytes([b[4], b[5]]),
+            polarity: Polarity::from_i8_clamped(b[0] as i8),
+            magnitude: b[1],
+            multiplier: b[2],
+            temperature: b[3],
+            hits: u16::from_le_bytes([b[4], b[5]]),
+            pressure: i16::from_le_bytes([b[6], b[7]]),
         }
     }
 }
@@ -124,7 +148,7 @@ impl Default for ThermalWeight {
     fn default() -> Self { Self::ZERO_HOT }
 }
 
-/// A matrix of thermal weights.
+/// A matrix of thermal synaptic strengths.
 #[derive(Clone, Debug)]
 pub struct ThermalWeightMatrix {
     pub data: Vec<ThermalWeight>,
@@ -137,7 +161,7 @@ pub struct ThermalWeightMatrix {
 pub struct ThermalMasteryConfig {
     /// Base pressure threshold (scaled by temperature band).
     pub pressure_threshold: i32,
-    /// Pressure decay per epoch.
+    /// Pressure decay per cycle.
     pub decay_rate: i32,
     /// Minimum participations before learning.
     pub participation_gate: u32,
@@ -162,13 +186,13 @@ impl Default for ThermalMasteryConfig {
     }
 }
 
-const MAGIC_V2: [u8; 4] = *b"ANT\x02";
-const BYTES_PER_WEIGHT: usize = 6;
+const MAGIC_V3: [u8; 4] = *b"ANT\x03";
+const BYTES_PER_WEIGHT: usize = 8;
 const LAYER_HEADER: usize = 8;
 const FILE_HEADER: usize = 16;
 
 impl ThermalWeightMatrix {
-    /// All weights zero and HOT.
+    /// All strengths zero and HOT.
     pub fn zeros(rows: usize, cols: usize) -> Self {
         Self {
             data: vec![ThermalWeight::ZERO_HOT; rows * cols],
@@ -186,44 +210,39 @@ impl ThermalWeightMatrix {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
-            let pol: i8 = if state & 1 == 0 { 1 } else { -1 };
+            let pol = if state & 1 == 0 { Polarity::Positive } else { Polarity::Negative };
             let mag = 20 + ((state >> 8) as u8 % 21);
             let k = K_LEVELS[((state >> 16) as usize) % K_LEVELS.len()];
-            data.push(ThermalWeight::hot(PackedSignal::pack(pol, mag, k)));
+            data.push(ThermalWeight::hot_from(pol, mag, k));
         }
         Self { data, rows, cols }
     }
 
-    /// Get weight at (row, col).
+    /// Get strength at (row, col).
     pub fn get(&self, row: usize, col: usize) -> &ThermalWeight {
         &self.data[row * self.cols + col]
     }
 
-    /// Get mutable weight at (row, col).
+    /// Get mutable strength at (row, col).
     pub fn get_mut(&mut self, row: usize, col: usize) -> &mut ThermalWeight {
         &mut self.data[row * self.cols + col]
     }
 
     /// Matmul using only the signal values (temperature doesn't affect computation).
-    pub fn matmul(&self, input: &[PackedSignal]) -> Vec<PackedSignal> {
+    pub fn matmul(&self, input: &[Signal]) -> Vec<Signal> {
         assert_eq!(input.len(), self.cols, "matmul input dimension mismatch");
         let mut output = Vec::with_capacity(self.rows);
         for i in 0..self.rows {
             let mut acc: i64 = 0;
             for j in 0..self.cols {
-                let w = self.data[i * self.cols + j].signal.current() as i64;
+                let w = self.data[i * self.cols + j].current() as i64;
                 let x = input[j].current() as i64;
                 acc += w * x;
             }
             let clamped = acc.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-            output.push(super::weight_matrix::packed_from_current(clamped));
+            output.push(Signal::from_current(clamped));
         }
         output
-    }
-
-    /// Extract just the PackedSignal values (for compatibility with existing matmul code).
-    pub fn signals(&self) -> Vec<PackedSignal> {
-        self.data.iter().map(|tw| tw.signal).collect()
     }
 
     /// Temperature distribution summary.
@@ -238,9 +257,8 @@ impl ThermalWeightMatrix {
         (hot, warm, cool, cold)
     }
 
-    /// Save to .ant v2 binary format.
+    /// Save to .ant v3 binary format.
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
-        // Body = layer header + weight data (everything after file header)
         let mut body = Vec::new();
         body.extend_from_slice(&(self.rows as u16).to_le_bytes());
         body.extend_from_slice(&(self.cols as u16).to_le_bytes());
@@ -250,7 +268,7 @@ impl ThermalWeightMatrix {
         let checksum = crc32fast::hash(&body);
 
         let mut out = Vec::with_capacity(FILE_HEADER + body.len());
-        out.extend_from_slice(&MAGIC_V2);
+        out.extend_from_slice(&MAGIC_V3);
         out.extend_from_slice(&1u16.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&checksum.to_le_bytes());
@@ -260,14 +278,14 @@ impl ThermalWeightMatrix {
         std::fs::write(path, out)
     }
 
-    /// Load from .ant v2 binary format.
+    /// Load from .ant v3 binary format.
     pub fn load(path: &std::path::Path) -> std::io::Result<Self> {
         let bytes = std::fs::read(path)?;
         Self::from_bytes_full(&bytes)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
-    /// Save multiple layers to one .ant v2 file.
+    /// Save multiple matrices to one .ant v3 file.
     pub fn save_multi(layers: &[&ThermalWeightMatrix], path: &std::path::Path) -> std::io::Result<()> {
         let mut body = Vec::new();
         for layer in layers {
@@ -279,7 +297,7 @@ impl ThermalWeightMatrix {
         let checksum = crc32fast::hash(&body);
 
         let mut out = Vec::with_capacity(FILE_HEADER + body.len());
-        out.extend_from_slice(&MAGIC_V2);
+        out.extend_from_slice(&MAGIC_V3);
         out.extend_from_slice(&(layers.len() as u16).to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&checksum.to_le_bytes());
@@ -289,11 +307,11 @@ impl ThermalWeightMatrix {
         std::fs::write(path, out)
     }
 
-    /// Load multiple layers from one .ant v2 file.
+    /// Load multiple matrices from one .ant v3 file.
     pub fn load_multi(path: &std::path::Path) -> std::io::Result<Vec<Self>> {
         let bytes = std::fs::read(path)?;
-        if bytes.len() < FILE_HEADER || bytes[0..4] != MAGIC_V2 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "not ANT v2"));
+        if bytes.len() < FILE_HEADER || bytes[0..4] != MAGIC_V3 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "not ANT v3"));
         }
         let n_layers = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
         let stored_crc = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
@@ -318,9 +336,9 @@ impl ThermalWeightMatrix {
             let mut data = Vec::with_capacity(n_weights);
             for i in 0..n_weights {
                 let base = offset + i * BYTES_PER_WEIGHT;
-                let b: [u8; 6] = [
-                    body[base], body[base + 1], body[base + 2],
-                    body[base + 3], body[base + 4], body[base + 5],
+                let b: [u8; 8] = [
+                    body[base], body[base + 1], body[base + 2], body[base + 3],
+                    body[base + 4], body[base + 5], body[base + 6], body[base + 7],
                 ];
                 data.push(ThermalWeight::from_bytes(&b));
             }
@@ -342,7 +360,7 @@ impl ThermalWeightMatrix {
 
     fn from_bytes_full(bytes: &[u8]) -> Result<Self, &'static str> {
         if bytes.len() < FILE_HEADER + LAYER_HEADER { return Err("too short"); }
-        if bytes[0..4] != MAGIC_V2 { return Err("not ANT v2"); }
+        if bytes[0..4] != MAGIC_V3 { return Err("not ANT v3"); }
 
         let stored_crc = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
         let body = &bytes[FILE_HEADER..];
@@ -358,9 +376,9 @@ impl ThermalWeightMatrix {
         let mut data = Vec::with_capacity(n_weights);
         for i in 0..n_weights {
             let base = weight_start + i * BYTES_PER_WEIGHT;
-            let b: [u8; 6] = [
-                body[base], body[base + 1], body[base + 2],
-                body[base + 3], body[base + 4], body[base + 5],
+            let b: [u8; 8] = [
+                body[base], body[base + 1], body[base + 2], body[base + 3],
+                body[base + 4], body[base + 5], body[base + 6], body[base + 7],
             ];
             data.push(ThermalWeight::from_bytes(&b));
         }
@@ -376,7 +394,7 @@ mod tests {
     #[test]
     fn thermal_weight_zero_hot() {
         let tw = ThermalWeight::ZERO_HOT;
-        assert_eq!(tw.signal.current(), 0);
+        assert_eq!(tw.current(), 0);
         assert_eq!(tw.temperature, 255);
         assert!(tw.is_hot());
         assert!(!tw.is_cold());
@@ -388,10 +406,10 @@ mod tests {
     fn thermal_weight_cooling() {
         let mut tw = ThermalWeight::ZERO_HOT;
         for _ in 0..100 {
-            tw.hit(100); // cooling_rate = 100
+            tw.hit(100);
         }
         assert_eq!(tw.hits, 100);
-        assert_eq!(tw.temperature, 254); // dropped by 1
+        assert_eq!(tw.temperature, 254);
     }
 
     #[test]
@@ -421,15 +439,12 @@ mod tests {
 
     #[test]
     fn thermal_weight_serialization() {
-        let tw = ThermalWeight {
-            signal: PackedSignal::pack(1, 64, 32),
-            temperature: 180,
-            hits: 1234,
-            pressure: -42,
-        };
+        let tw = ThermalWeight::hot_from(Polarity::Positive, 64, 32);
         let bytes = tw.to_bytes();
         let tw2 = ThermalWeight::from_bytes(&bytes);
-        assert_eq!(tw.signal.as_u8(), tw2.signal.as_u8());
+        assert_eq!(tw.polarity, tw2.polarity);
+        assert_eq!(tw.magnitude, tw2.magnitude);
+        assert_eq!(tw.multiplier, tw2.multiplier);
         assert_eq!(tw.temperature, tw2.temperature);
         assert_eq!(tw.hits, tw2.hits);
         assert_eq!(tw.pressure, tw2.pressure);
@@ -440,7 +455,7 @@ mod tests {
         let m = ThermalWeightMatrix::zeros(4, 8);
         assert_eq!(m.data.len(), 32);
         assert!(m.data.iter().all(|tw| tw.is_hot()));
-        assert!(m.data.iter().all(|tw| tw.signal.current() == 0));
+        assert!(m.data.iter().all(|tw| tw.current() == 0));
     }
 
     #[test]
@@ -448,21 +463,21 @@ mod tests {
         let m = ThermalWeightMatrix::random_hot(4, 8, 42);
         assert_eq!(m.data.len(), 32);
         assert!(m.data.iter().all(|tw| tw.is_hot()));
-        assert!(m.data.iter().any(|tw| tw.signal.current() != 0));
+        assert!(m.data.iter().any(|tw| tw.current() != 0));
     }
 
     #[test]
     fn thermal_matrix_matmul() {
         let mut m = ThermalWeightMatrix::zeros(2, 2);
-        m.data[0] = ThermalWeight::hot(PackedSignal::pack(1, 1, 1)); // +1
-        m.data[3] = ThermalWeight::hot(PackedSignal::pack(1, 1, 1)); // +1
+        m.data[0] = ThermalWeight::hot_from(Polarity::Positive, 1, 1); // +1
+        m.data[3] = ThermalWeight::hot_from(Polarity::Positive, 1, 1); // +1
         let input = vec![
-            PackedSignal::pack(1, 64, 1),
-            PackedSignal::pack(-1, 32, 1),
+            Signal::new_raw(1, 64, 1),
+            Signal::new_raw(-1, 32, 1),
         ];
         let output = m.matmul(&input);
-        assert!(output[0].is_positive());
-        assert!(output[1].is_negative());
+        assert!(output[0].current() > 0);
+        assert!(output[1].current() < 0);
     }
 
     #[test]
@@ -471,7 +486,7 @@ mod tests {
         let path = dir.path().join("test.ant");
 
         let mut m = ThermalWeightMatrix::random_hot(3, 5, 42);
-        m.data[7].temperature = 50; // set one to COLD
+        m.data[7].temperature = 50;
         m.data[7].hits = 9999;
         m.data[7].pressure = -100;
         m.save(&path).unwrap();
@@ -485,7 +500,9 @@ mod tests {
         assert_eq!(m2.data[7].pressure, -100);
 
         for i in 0..15 {
-            assert_eq!(m.data[i].signal.as_u8(), m2.data[i].signal.as_u8());
+            assert_eq!(m.data[i].polarity, m2.data[i].polarity);
+            assert_eq!(m.data[i].magnitude, m2.data[i].magnitude);
+            assert_eq!(m.data[i].multiplier, m2.data[i].multiplier);
             assert_eq!(m.data[i].temperature, m2.data[i].temperature);
         }
     }
@@ -508,7 +525,7 @@ mod tests {
         assert_eq!(loaded[1].cols, 48);
 
         for i in 0..hidden.data.len() {
-            assert_eq!(hidden.data[i].signal.as_u8(), loaded[0].data[i].signal.as_u8());
+            assert_eq!(hidden.data[i].current(), loaded[0].data[i].current());
         }
     }
 

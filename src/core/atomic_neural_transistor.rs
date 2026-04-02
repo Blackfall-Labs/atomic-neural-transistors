@@ -14,8 +14,7 @@ use runes_core::value::Value;
 use runes_parser::lexer::Lexer;
 use runes_parser::parser::Parser;
 use runes_eval::evaluator::Evaluator;
-use ternary_signal::PackedSignal;
-use thermogram::{PlasticityRule, Thermogram};
+use ternary_signal::Signal;
 
 /// Atomic Neural Transistor — loads and executes a .rune program with ant_ml verbs.
 pub struct AtomicNeuralTransistor {
@@ -63,64 +62,10 @@ impl AtomicNeuralTransistor {
         })
     }
 
-    /// Load from source with Thermogram persistence.
-    /// If `thermo_path` exists, loads the Thermogram from disk.
-    /// Otherwise creates a fresh one with the given name.
-    pub fn from_source_with_thermogram(
-        source: &str,
-        base_path: Option<PathBuf>,
-        thermo_name: &str,
-        thermo_path: Option<&Path>,
-    ) -> Result<Self> {
-        let mut rt = AntRuntime::new();
-        if let Some(bp) = base_path {
-            rt = rt.with_base_path(bp);
-        }
-
-        // Load or create Thermogram
-        let thermo = if let Some(tp) = thermo_path {
-            if tp.exists() {
-                Thermogram::load(tp)
-                    .map_err(|e| AntError::Io(format!("thermogram load: {e}")))?
-            } else {
-                Thermogram::new(thermo_name, PlasticityRule::stdp_like())
-            }
-        } else {
-            Thermogram::new(thermo_name, PlasticityRule::stdp_like())
-        };
-        rt.set_thermogram(thermo);
-
-        let runtime = Arc::new(Mutex::new(rt));
-
-        let engine = Engine::builder()
-            .namespace("default")
-                .module(AntMlModule::new())
-            .build()
-            .map_err(|e| AntError::Runes(format!("engine build: {e:?}")))?;
-
-        Ok(Self {
-            source: source.to_string(),
-            engine,
-            runtime,
-            evaluator: None,
-        })
-    }
-
-    /// Save the Thermogram to disk.
-    pub fn save_thermogram(&self, path: &Path) -> Result<()> {
-        let guard = self.runtime.lock()
-            .map_err(|_| AntError::Config("runtime lock poisoned".into()))?;
-        if let Some(thermo) = guard.thermogram() {
-            thermo.save(path)
-                .map_err(|e| AntError::Io(format!("thermogram save: {e}")))?;
-        }
-        Ok(())
-    }
-
     /// Execute a named function in the .rune script with the given input.
-    pub fn call(&mut self, func_name: &str, input: &[PackedSignal]) -> Result<Vec<PackedSignal>> {
+    pub fn call(&mut self, func_name: &str, input: &[Signal]) -> Result<Vec<Signal>> {
         let input_vals: Vec<Value> = input.iter()
-            .map(|s| Value::Integer(s.as_u8() as i64))
+            .map(|s| Value::Integer(s.current() as i64))
             .collect();
 
         let result = self.eval_call(func_name, vec![Value::Array(Arc::new(input_vals))])?;
@@ -129,7 +74,7 @@ impl AtomicNeuralTransistor {
             Value::Array(arr) => {
                 arr.iter()
                     .map(|v| match v {
-                        Value::Integer(n) => Ok(PackedSignal::from_raw(*n as u8)),
+                        Value::Integer(n) => Ok(Signal::from_current(*n as i32)),
                         _ => Err(AntError::ShapeMismatch {
                             expected: "integer array".into(),
                             got: format!("{}", v.type_name()),
@@ -138,7 +83,7 @@ impl AtomicNeuralTransistor {
                     .collect()
             }
             Value::Integer(n) => {
-                Ok(vec![PackedSignal::from_raw(n as u8)])
+                Ok(vec![Signal::from_current(n as i32)])
             }
             _ => Err(AntError::ShapeMismatch {
                 expected: "array or integer".into(),
@@ -150,23 +95,14 @@ impl AtomicNeuralTransistor {
     /// Execute a named function with arbitrary `Value` arguments.
     ///
     /// Use this when you need to pass handles, integers, or mixed types
-    /// (not just a single PackedSignal array).
+    /// (not just a single Signal array).
     pub fn call_values(&mut self, func_name: &str, args: Vec<Value>) -> Result<Value> {
         self.eval_call(func_name, args)
     }
 
     /// Execute the .rune script's `forward` function with the given input.
-    pub fn forward(&mut self, input: &[PackedSignal]) -> Result<Vec<PackedSignal>> {
+    pub fn forward(&mut self, input: &[Signal]) -> Result<Vec<Signal>> {
         self.call("forward", input)
-    }
-
-    /// Execute the .rune script's `forward` function with i32 input/output.
-    pub fn forward_i32(&mut self, input: &[i32]) -> Result<Vec<i32>> {
-        let packed: Vec<PackedSignal> = input.iter()
-            .map(|&v| crate::core::weight_matrix::packed_from_current(v))
-            .collect();
-        let output = self.forward(&packed)?;
-        Ok(output.iter().map(|s| s.current()).collect())
     }
 
     /// Ensure the evaluator is initialized with function definitions from the .rune source.
@@ -234,17 +170,17 @@ end"#;
     fn test_forward_relu() {
         let mut ant = AtomicNeuralTransistor::from_source(TEST_RUNE).unwrap();
         let input = vec![
-            PackedSignal::pack(1, 100, 1),   // positive
-            PackedSignal::pack(-1, 50, 1),   // negative
-            PackedSignal::pack(1, 200, 1),   // positive
-            PackedSignal::ZERO,              // zero
+            Signal::new_raw(1, 100, 1),   // positive
+            Signal::new_raw(-1, 50, 1),   // negative
+            Signal::new_raw(1, 200, 1),   // positive
+            Signal::ZERO,                 // zero
         ];
         let output = ant.forward(&input).unwrap();
         assert_eq!(output.len(), 4);
-        assert!(output[0].is_positive());
-        assert!(!output[1].is_active()); // ReLU clamps negative
-        assert!(output[2].is_positive());
-        assert!(!output[3].is_active());
+        assert!(output[0].current() > 0);
+        assert!(output[1].current() == 0); // ReLU clamps negative
+        assert!(output[2].current() > 0);
+        assert!(output[3].current() == 0);
     }
 
     #[test]
@@ -258,10 +194,10 @@ def forward(input) do
     zeros(4)
 end"#;
         let mut ant = AtomicNeuralTransistor::from_source(source).unwrap();
-        let output = ant.forward(&[PackedSignal::ZERO]).unwrap();
+        let output = ant.forward(&[Signal::ZERO]).unwrap();
         assert_eq!(output.len(), 4);
-        for ps in &output {
-            assert_eq!(ps.current(), 0);
+        for s in &output {
+            assert_eq!(s.current(), 0);
         }
     }
 }

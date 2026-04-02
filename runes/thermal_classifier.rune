@@ -1,0 +1,56 @@
+rune "thermal_classifier" do
+  version 1
+end
+use :ant_ml
+
+# Thermal classifier: both regions learn with temperature-gated plasticity.
+# Hidden 24x32 (thermal, random init) → ReLU → Output 4x24 (thermal, zeros)
+# Hidden target derived from output error × output weight signs.
+
+def forward(input) do
+    w_hidden = thermal_load_synaptic("thermal.w_hidden", 24, 32, 42)
+    w_out = thermal_load_synaptic("thermal.w_out", 4, 24)
+
+    h = thermal_matmul(input, w_hidden)
+    h = relu(h)
+    thermal_matmul(h, w_out)
+end
+
+def predict(input) do
+    argmax(forward(input))
+end
+
+def hidden_forward(input) do
+    w_hidden = thermal_load_synaptic("thermal.w_hidden", 24, 32, 42)
+    h = thermal_matmul(input, w_hidden)
+    relu(h)
+end
+
+def output_forward(h) do
+    w_out = thermal_load_synaptic("thermal.w_out", 4, 24)
+    thermal_matmul(h, w_out)
+end
+
+def train_output(h, out, target, correct) do
+    w_out = thermal_load_synaptic("thermal.w_out", 4, 24)
+    out_c = clamp(out, -127, 127)
+    thermal_mastery_update(w_out, h, out_c, target, correct, [3, 1, 5, 50, 10, 20])
+end
+
+def train_hidden(input, h, target_hidden, correct) do
+    w_hidden = thermal_load_synaptic("thermal.w_hidden", 24, 32, 42)
+    h_c = clamp(h, -127, 127)
+    thermal_mastery_update(w_hidden, input, h_c, target_hidden, correct, [5, 1, 10, 50, 10, 20])
+end
+
+def decay_all() do
+    w_hidden = thermal_load_synaptic("thermal.w_hidden", 24, 32, 42)
+    w_out = thermal_load_synaptic("thermal.w_out", 4, 24)
+    thermal_decay(w_hidden)
+    thermal_decay(w_out)
+end
+
+def summary_hidden() do
+    w_hidden = thermal_load_synaptic("thermal.w_hidden", 24, 32, 42)
+    thermal_summary(w_hidden)
+end

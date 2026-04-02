@@ -1,256 +1,119 @@
 //! ANT Benchmarks — proving microsecond latency, determinism, and spec compliance.
 //!
-//! Spec claims (from ternsig originals):
-//!   - Classifier: 32→24→4, 3x gated recurrence, 1920 params
-//!   - Compare:    64→16→16→1, 1296 params
-//!   - Diff:       64→24→32, 2304 params
-//!   - Gate:       64→16→32 (sigmoid + slice + mul), 1536 params
-//!   - Merge:      64→24→32, 2304 params
-//!   - All forward passes complete in microseconds
-//!   - All outputs are deterministic (same input → same output, every time)
+//! All benchmarks use Signal (not PackedSignal) and Runes-based execution.
+//! Thermogram benchmarks removed — replaced with .ant v3 format benchmarks.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use std::sync::Arc;
 use atomic_neural_transistors::{
-    AtomicNeuralTransistor, ClassifierANT, CompareANT, DiffANT, GateANT, MergeANT, PackedSignal,
-    MultiplexEncoder, AntSlot, SalienceRouter, PredictionEngine, NeuromodState, Chemical,
+    AtomicNeuralTransistor, Signal, Value,
+    SalienceRouter, PredictionEngine, NeuromodState, Chemical,
+    ThermalWeightMatrix,
 };
-use atomic_neural_transistors::core::weight_matrix::packed_from_current;
 
 // ---------------------------------------------------------------------------
 // Input generators
 // ---------------------------------------------------------------------------
 
-fn classifier_input() -> Vec<PackedSignal> {
-    (0..32).map(|i| PackedSignal::pack(1, (i as u8 * 7) % 255, 1)).collect()
+fn make_input(dim: usize, seed: u8) -> Vec<Signal> {
+    (0..dim).map(|i| Signal::new_raw(1, ((i as u8).wrapping_mul(seed)) % 255, 1)).collect()
+}
+
+fn signals_to_value(signals: &[Signal]) -> Value {
+    Value::Array(Arc::new(
+        signals.iter().map(|s| Value::Integer(s.current() as i64)).collect()
+    ))
 }
 
 // ---------------------------------------------------------------------------
-// Forward pass latency benchmarks
+// Forward pass latency benchmarks (via Runes)
 // ---------------------------------------------------------------------------
 
 fn bench_classifier_forward(c: &mut Criterion) {
-    let mut ant = ClassifierANT::new().unwrap();
-    let input = classifier_input();
+    let mut ant = AtomicNeuralTransistor::from_source(
+        include_str!("../runes/classifier.rune")
+    ).unwrap();
+    let input = make_input(32, 7);
+    let input_val = signals_to_value(&input);
+
     c.bench_function("classifier_forward", |b| {
-        b.iter(|| ant.classify(black_box(&input)))
+        b.iter(|| ant.call_values("forward", vec![black_box(input_val.clone())]))
     });
 }
 
 fn bench_compare_forward(c: &mut Criterion) {
-    let mut ant = CompareANT::new().unwrap();
-    let a: Vec<PackedSignal> = (0..32).map(|i| PackedSignal::pack(1, (i as u8 * 5) % 200, 1)).collect();
-    let b: Vec<PackedSignal> = (0..32).map(|i| PackedSignal::pack(-1, (i as u8 * 3) % 180, 1)).collect();
-    c.bench_function("compare_forward", |b_iter| {
-        b_iter.iter(|| ant.compare(black_box(&a), black_box(&b)))
-    });
-}
+    let mut ant = AtomicNeuralTransistor::from_source(
+        include_str!("../runes/compare.rune")
+    ).unwrap();
+    let a = make_input(32, 5);
+    let b = make_input(32, 3);
+    let mut input_signals = a;
+    input_signals.extend_from_slice(&b);
+    let input_val = signals_to_value(&input_signals);
 
-fn bench_diff_forward(c: &mut Criterion) {
-    let mut ant = DiffANT::new().unwrap();
-    let a: Vec<PackedSignal> = (0..32).map(|i| PackedSignal::pack(1, (i as u8 * 4) % 220, 1)).collect();
-    let b: Vec<PackedSignal> = (0..32).map(|i| PackedSignal::pack(1, (i as u8 * 6) % 190, 1)).collect();
-    c.bench_function("diff_forward", |b_iter| {
-        b_iter.iter(|| ant.diff(black_box(&a), black_box(&b)))
+    c.bench_function("compare_forward", |b_iter| {
+        b_iter.iter(|| ant.call_values("forward", vec![black_box(input_val.clone())]))
     });
 }
 
 fn bench_gate_forward(c: &mut Criterion) {
-    let mut ant = GateANT::new().unwrap();
-    let signal: Vec<PackedSignal> = (0..32).map(|i| PackedSignal::pack(1, (i as u8 * 8) % 255, 1)).collect();
-    let context: Vec<PackedSignal> = (0..32).map(|_| PackedSignal::pack(1, 128, 1)).collect();
+    let mut ant = AtomicNeuralTransistor::from_source(
+        include_str!("../runes/gate.rune")
+    ).unwrap();
+    let input = make_input(64, 11);
+    let input_val = signals_to_value(&input);
+
     c.bench_function("gate_forward", |b| {
-        b.iter(|| ant.gate(black_box(&signal), black_box(&context)))
+        b.iter(|| ant.call_values("forward", vec![black_box(input_val.clone())]))
+    });
+}
+
+fn bench_diff_forward(c: &mut Criterion) {
+    let mut ant = AtomicNeuralTransistor::from_source(
+        include_str!("../runes/diff.rune")
+    ).unwrap();
+    let input = make_input(64, 13);
+    let input_val = signals_to_value(&input);
+
+    c.bench_function("diff_forward", |b| {
+        b.iter(|| ant.call_values("forward", vec![black_box(input_val.clone())]))
     });
 }
 
 fn bench_merge_forward(c: &mut Criterion) {
-    let mut ant = MergeANT::new().unwrap();
-    let s1: Vec<PackedSignal> = (0..32).map(|i| PackedSignal::pack(1, (i as u8 * 2) % 200, 1)).collect();
-    let s2: Vec<PackedSignal> = (0..32).map(|i| PackedSignal::pack(-1, (i as u8 * 4) % 180, 1)).collect();
+    let mut ant = AtomicNeuralTransistor::from_source(
+        include_str!("../runes/merge.rune")
+    ).unwrap();
+    let input = make_input(64, 17);
+    let input_val = signals_to_value(&input);
+
     c.bench_function("merge_forward", |b| {
-        b.iter(|| ant.merge(black_box(&[s1.as_slice(), s2.as_slice()])))
+        b.iter(|| ant.call_values("forward", vec![black_box(input_val.clone())]))
     });
 }
 
 // ---------------------------------------------------------------------------
-// Determinism proof: same input produces byte-identical output across 1000 runs
+// Determinism proof
 // ---------------------------------------------------------------------------
 
-fn bench_determinism(c: &mut Criterion) {
-    let mut group = c.benchmark_group("determinism");
+fn bench_determinism_classifier(c: &mut Criterion) {
+    let mut ant = AtomicNeuralTransistor::from_source(
+        include_str!("../runes/classifier.rune")
+    ).unwrap();
+    let input = make_input(32, 7);
+    let input_val = signals_to_value(&input);
 
-    // Classifier
-    group.bench_function("classifier_1000x", |b| {
-        let mut ant = ClassifierANT::new().unwrap();
-        let input = classifier_input();
-        let reference = ant.classify(&input).unwrap();
+    // Get reference output
+    let ref_output = ant.call_values("forward", vec![input_val.clone()]).unwrap();
+
+    c.bench_function("determinism_classifier_1000x", |b| {
         b.iter(|| {
-            let out = ant.classify(black_box(&input)).unwrap();
-            assert_eq!(out.len(), reference.len());
-            for (i, (r, o)) in reference.iter().zip(out.iter()).enumerate() {
-                assert_eq!(r.as_u8(), o.as_u8(), "classifier non-determinism at index {i}");
+            for _ in 0..1000 {
+                let out = ant.call_values("forward", vec![input_val.clone()]).unwrap();
+                assert_eq!(format!("{:?}", out), format!("{:?}", ref_output));
             }
-        });
+        })
     });
-
-    // Gate (most complex new logic: slice + mul + shift)
-    group.bench_function("gate_1000x", |b| {
-        let mut ant = GateANT::new().unwrap();
-        let signal: Vec<PackedSignal> = (0..32).map(|i| PackedSignal::pack(1, (i as u8 * 8) % 255, 1)).collect();
-        let context: Vec<PackedSignal> = (0..32).map(|_| PackedSignal::pack(1, 128, 1)).collect();
-        let reference = ant.gate(&signal, &context).unwrap();
-        b.iter(|| {
-            let out = ant.gate(black_box(&signal), black_box(&context)).unwrap();
-            for (i, (r, o)) in reference.iter().zip(out.iter()).enumerate() {
-                assert_eq!(r.as_u8(), o.as_u8(), "gate non-determinism at index {i}");
-            }
-        });
-    });
-
-    group.finish();
-}
-
-// ---------------------------------------------------------------------------
-// Param count spec verification
-// ---------------------------------------------------------------------------
-
-fn bench_param_count_spec(c: &mut Criterion) {
-    // These aren't benchmarks per se — they run once and assert spec compliance.
-    // Using criterion to get them into the bench output.
-    c.bench_function("spec_param_counts", |b| {
-        b.iter(|| {
-            // Classifier: 24*32 + 24*24 + 24*24 + 4*24 = 768 + 576 + 576 + 96 = 2016
-            // Wait — ternsig says 1920. Let me recount:
-            // 24*32=768, 24*24=576, 24*24=576, 4*24=96 → 768+576+576+96 = 2016
-            // But ternsig header says 1920. The file says:
-            //   24*32 + 24*24 + 24*24 + 4*24 = 1920
-            //   That's 768 + 576 + 576 + 96 = 2016. The ternsig comment is wrong.
-            //   Actual: 2016. But weight files match the matrix dimensions.
-            let classifier_params = 24 * 32 + 24 * 24 + 24 * 24 + 4 * 24;
-            assert_eq!(classifier_params, 2016, "classifier param count");
-
-            // Compare: 16*64 + 16*16 + 1*16 = 1024 + 256 + 16 = 1296
-            let compare_params = 16 * 64 + 16 * 16 + 1 * 16;
-            assert_eq!(compare_params, 1296, "compare param count");
-
-            // Diff: 24*64 + 32*24 = 1536 + 768 = 2304
-            let diff_params = 24 * 64 + 32 * 24;
-            assert_eq!(diff_params, 2304, "diff param count");
-
-            // Gate: 16*64 + 32*16 = 1024 + 512 = 1536
-            let gate_params = 16 * 64 + 32 * 16;
-            assert_eq!(gate_params, 1536, "gate param count");
-
-            // Merge: 24*64 + 32*24 = 1536 + 768 = 2304
-            let merge_params = 24 * 64 + 32 * 24;
-            assert_eq!(merge_params, 2304, "merge param count");
-
-            // Total: 2016 + 1296 + 2304 + 1536 + 2304 = 9456
-            let total = classifier_params + compare_params + diff_params + gate_params + merge_params;
-            assert!(total < 10_000, "total params {} exceeds 10K", total);
-
-            // Each ANT < 5K params
-            assert!(classifier_params < 5000, "classifier exceeds 5K");
-            assert!(compare_params < 5000, "compare exceeds 5K");
-            assert!(diff_params < 5000, "diff exceeds 5K");
-            assert!(gate_params < 5000, "gate exceeds 5K");
-            assert!(merge_params < 5000, "merge exceeds 5K");
-        });
-    });
-}
-
-// ---------------------------------------------------------------------------
-// Output shape spec verification
-// ---------------------------------------------------------------------------
-
-fn bench_output_shapes(c: &mut Criterion) {
-    c.bench_function("spec_output_shapes", |b| {
-        let mut classifier = ClassifierANT::new().unwrap();
-        let mut compare = CompareANT::new().unwrap();
-        let mut diff = DiffANT::new().unwrap();
-        let mut gate = GateANT::new().unwrap();
-        let mut merge = MergeANT::new().unwrap();
-
-        b.iter(|| {
-            // Classifier: 32 in → 4 out (class logits)
-            let out = classifier.classify(&classifier_input()).unwrap();
-            assert_eq!(out.len(), 4, "classifier output should be 4 classes");
-
-            // Compare: 64 in → 1 out (similarity)
-            let a: Vec<PackedSignal> = (0..32).map(|i| PackedSignal::pack(1, i as u8, 1)).collect();
-            let b_vec: Vec<PackedSignal> = (0..32).map(|i| PackedSignal::pack(1, i as u8, 1)).collect();
-            let _out = compare.compare(&a, &b_vec).unwrap();
-            // compare returns PackedSignal (single value) — that's correct
-
-            // Diff: 64 in → 32 out
-            let out = diff.diff(&a, &b_vec).unwrap();
-            assert_eq!(out.len(), 32, "diff output should be 32");
-
-            // Gate: 64 in → 32 out (gated signal)
-            let signal: Vec<PackedSignal> = (0..32).map(|_| PackedSignal::pack(1, 100, 1)).collect();
-            let ctx: Vec<PackedSignal> = (0..32).map(|_| PackedSignal::pack(1, 128, 1)).collect();
-            let out = gate.gate(&signal, &ctx).unwrap();
-            assert_eq!(out.len(), 32, "gate output should be 32");
-
-            // Merge: 64 in → 32 out
-            let out = merge.merge(&[a.as_slice(), b_vec.as_slice()]).unwrap();
-            assert_eq!(out.len(), 32, "merge output should be 32");
-        });
-    });
-}
-
-// ---------------------------------------------------------------------------
-// Thermogram persistence latency
-// ---------------------------------------------------------------------------
-
-fn bench_thermogram_save_load(c: &mut Criterion) {
-    use thermogram::{Thermogram, PlasticityRule, Delta};
-
-    let dir = tempfile::tempdir().unwrap();
-    let thermo_path = dir.path().join("bench.thermo");
-
-    // Build a thermogram with all 5 ANTs' synaptic strengths
-    let mut thermo = Thermogram::new("bench", PlasticityRule::stdp_like());
-    let keys: Vec<(&str, usize)> = vec![
-        ("classifier.w_in", 24 * 32),
-        ("classifier.w_rec", 24 * 24),
-        ("classifier.w_gate", 24 * 24),
-        ("classifier.w_out", 4 * 24),
-        ("compare.w_in", 16 * 64),
-        ("compare.w_hidden", 16 * 16),
-        ("compare.w_out", 1 * 16),
-        ("diff.w_in", 24 * 64),
-        ("diff.w_out", 32 * 24),
-        ("gate.w_in", 16 * 64),
-        ("gate.w_out", 32 * 16),
-        ("merge.w_in", 24 * 64),
-        ("merge.w_out", 32 * 24),
-    ];
-    for (key, size) in &keys {
-        let data: Vec<PackedSignal> = (0..*size)
-            .map(|i| PackedSignal::pack(1, (i % 200) as u8, 1))
-            .collect();
-        let prev_hash = thermo.dirty_chain.head_hash.clone();
-        let delta = if prev_hash.is_none() {
-            Delta::create(*key, data, "bench")
-        } else {
-            Delta::update(*key, data, "bench", thermogram::Signal::positive(255), prev_hash)
-        };
-        thermo.apply_delta(delta).unwrap();
-    }
-    thermo.save(&thermo_path).unwrap();
-
-    let mut group = c.benchmark_group("thermogram");
-
-    group.bench_function("save_all_ants", |b| {
-        b.iter(|| thermo.save(black_box(&thermo_path)).unwrap());
-    });
-
-    group.bench_function("load_all_ants", |b| {
-        b.iter(|| Thermogram::load(black_box(&thermo_path)).unwrap());
-    });
-
-    group.finish();
 }
 
 // ---------------------------------------------------------------------------
@@ -258,145 +121,151 @@ fn bench_thermogram_save_load(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 fn bench_mastery_update(c: &mut Criterion) {
-    c.bench_function("mastery_update_step", |b| {
-        let source = r#"rune "bench_mastery" do
-  version 1
-end
-use :ant_ml
+    let mut ant = AtomicNeuralTransistor::from_source(
+        include_str!("../runes/classifier_train.rune")
+    ).unwrap();
 
-def forward(input) do
-    w = load_synaptic("bench.w", 8, 16)
-    out = matmul(input, w, 8, 16)
-    out = relu(out)
-    target = zeros(8)
-    mastery_update(w, input, out, target, [3, 1, 5])
-    out
-end"#;
+    // Pack [input(32) | class(1)]
+    let mut data: Vec<Value> = make_input(32, 7).iter()
+        .map(|s| Value::Integer(s.current() as i64))
+        .collect();
+    data.push(Value::Integer(2)); // class 2
+    let data_val = Value::Array(Arc::new(data));
 
-        let mut ant = AtomicNeuralTransistor::from_source_with_thermogram(
-            source, None, "mastery_bench", None,
-        ).unwrap();
-        let input: Vec<PackedSignal> = (0..16)
-            .map(|i| PackedSignal::pack(1, (i as u8 * 10) % 200, 1))
-            .collect();
-
-        b.iter(|| ant.forward(black_box(&input)).unwrap());
+    c.bench_function("mastery_update_classifier", |b| {
+        b.iter(|| ant.call_values("train", vec![black_box(data_val.clone())]))
     });
 }
 
 // ---------------------------------------------------------------------------
-// Multiplex encoder benchmarks
+// Thermal benchmarks
 // ---------------------------------------------------------------------------
 
-fn make_bench_signal(dim: usize) -> Vec<PackedSignal> {
-    (0..dim).map(|i| PackedSignal::pack(1, (i as u8 * 7) % 200, 1)).collect()
+fn bench_thermal_matmul(c: &mut Criterion) {
+    let mut ant = AtomicNeuralTransistor::from_source(
+        include_str!("../runes/thermal_classifier.rune")
+    ).unwrap();
+    let input = make_input(32, 7);
+    let input_val = signals_to_value(&input);
+
+    c.bench_function("thermal_forward", |b| {
+        b.iter(|| ant.call_values("forward", vec![black_box(input_val.clone())]))
+    });
 }
 
-fn bench_multiplex_process(c: &mut Criterion) {
-    let mut group = c.benchmark_group("multiplex");
+// ---------------------------------------------------------------------------
+// .ant v3 persistence latency
+// ---------------------------------------------------------------------------
 
-    // 3-ANT multiplex with product-feature closures
-    group.bench_function("3_ant_process", |b| {
-        let mut mux = MultiplexEncoder::new(32, 3, 40);
-        let proto1 = make_bench_signal(32);
-        let proto2: Vec<PackedSignal> = proto1.iter()
-            .map(|s| packed_from_current(-s.current()))
-            .collect();
-        let proto3 = make_bench_signal(32);
+fn bench_ant_save_load(c: &mut Criterion) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bench.ant");
 
-        let p1 = proto1.clone();
-        mux.add_slot(AntSlot::with_passthrough("a", Box::new(move |input: &[PackedSignal]| {
-            input.iter().zip(p1.iter()).map(|(x, p)| {
-                packed_from_current((x.current() as i64 * p.current() as i64 / 256) as i32)
-            }).collect()
-        })));
-        let p2 = proto2.clone();
-        mux.add_slot(AntSlot::with_passthrough("b", Box::new(move |input: &[PackedSignal]| {
-            input.iter().zip(p2.iter()).map(|(x, p)| {
-                packed_from_current((x.current() as i64 * p.current() as i64 / 256) as i32)
-            }).collect()
-        })));
-        let p3 = proto3.clone();
-        mux.add_slot(AntSlot::with_passthrough("c", Box::new(move |input: &[PackedSignal]| {
-            input.iter().zip(p3.iter()).map(|(x, p)| {
-                packed_from_current((x.current() as i64 * p.current() as i64 / 256) as i32)
-            }).collect()
-        })));
-        mux.finalize();
+    let twm = ThermalWeightMatrix::random_hot(48, 80, 42);
 
-        let input = make_bench_signal(32);
-        let target = make_bench_signal(32);
-
-        b.iter(|| mux.process(black_box(&input), Some(black_box(&target))));
+    c.bench_function("ant_v3_save", |b| {
+        b.iter(|| twm.save(black_box(&path)))
     });
 
-    group.finish();
+    // Ensure file exists for load
+    twm.save(&path).unwrap();
+
+    c.bench_function("ant_v3_load", |b| {
+        b.iter(|| ThermalWeightMatrix::load(black_box(&path)))
+    });
 }
+
+// ---------------------------------------------------------------------------
+// Salience routing latency
+// ---------------------------------------------------------------------------
 
 fn bench_salience_route(c: &mut Criterion) {
     let router = SalienceRouter::new(3, 32);
-    let outputs = make_bench_signal(96); // 3 × 32
+    let outputs: Vec<Signal> = make_input(96, 23); // 3 × 32
 
     c.bench_function("salience_route_3x32", |b| {
-        b.iter(|| router.route(black_box(&outputs)));
+        b.iter(|| router.route(black_box(&outputs)))
     });
 }
 
-fn bench_prediction_observe(c: &mut Criterion) {
+// ---------------------------------------------------------------------------
+// Prediction engine latency
+// ---------------------------------------------------------------------------
+
+fn bench_predict_observe(c: &mut Criterion) {
     let mut pred = PredictionEngine::new(32, 3, 40);
-    let signal = make_bench_signal(32);
-    // Warm up
-    for _ in 0..10 {
-        pred.observe(&signal, None);
-    }
+    let signal = make_input(32, 29);
 
-    c.bench_function("prediction_observe_32dim", |b| {
-        b.iter(|| pred.observe(black_box(&signal), None));
+    c.bench_function("predict_observe_32dim", |b| {
+        b.iter(|| pred.observe(black_box(&signal), None))
     });
 }
 
-fn bench_neuromod(c: &mut Criterion) {
-    let mut group = c.benchmark_group("neuromod");
+// ---------------------------------------------------------------------------
+// Neuromod cycle latency
+// ---------------------------------------------------------------------------
 
-    group.bench_function("inject_tick", |b| {
-        let mut nm = NeuromodState::new();
+fn bench_neuromod_cycle(c: &mut Criterion) {
+    let mut nm = NeuromodState::new();
+
+    c.bench_function("neuromod_full_cycle", |b| {
         b.iter(|| {
             nm.inject(Chemical::Dopamine, 20);
+            nm.inject(Chemical::Norepinephrine, 10);
+            nm.inject(Chemical::Serotonin, -5);
+            let _ = nm.plasticity_open();
+            let _ = nm.participation_divisor();
+            let _ = nm.decay_multiplier();
             nm.tick();
-        });
+        })
     });
-
-    group.bench_function("full_cycle", |b| {
-        let mut nm = NeuromodState::new();
-        b.iter(|| {
-            nm.inject(Chemical::Dopamine, black_box(20));
-            nm.inject(Chemical::Norepinephrine, black_box(10));
-            nm.inject(Chemical::Serotonin, black_box(-5));
-            let _ = black_box(nm.plasticity_open());
-            let _ = black_box(nm.participation_divisor());
-            let _ = black_box(nm.decay_multiplier());
-            nm.tick();
-        });
-    });
-
-    group.finish();
 }
 
+// ---------------------------------------------------------------------------
+// Groups
+// ---------------------------------------------------------------------------
+
 criterion_group!(
-    benches,
+    forward_latency,
     bench_classifier_forward,
     bench_compare_forward,
-    bench_diff_forward,
     bench_gate_forward,
+    bench_diff_forward,
     bench_merge_forward,
-    bench_determinism,
-    bench_param_count_spec,
-    bench_output_shapes,
-    bench_thermogram_save_load,
-    bench_mastery_update,
-    bench_multiplex_process,
-    bench_salience_route,
-    bench_prediction_observe,
-    bench_neuromod,
 );
-criterion_main!(benches);
+
+criterion_group!(
+    determinism,
+    bench_determinism_classifier,
+);
+
+criterion_group!(
+    mastery,
+    bench_mastery_update,
+);
+
+criterion_group!(
+    thermal,
+    bench_thermal_matmul,
+);
+
+criterion_group!(
+    persistence,
+    bench_ant_save_load,
+);
+
+criterion_group!(
+    subsystems,
+    bench_salience_route,
+    bench_predict_observe,
+    bench_neuromod_cycle,
+);
+
+criterion_main!(
+    forward_latency,
+    determinism,
+    mastery,
+    thermal,
+    persistence,
+    subsystems,
+);

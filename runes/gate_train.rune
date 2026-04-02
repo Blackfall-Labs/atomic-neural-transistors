@@ -1,0 +1,42 @@
+rune "gate_train" do
+  version 1
+end
+use :ant_ml
+
+# GateANT: learn to pass/block signal dimensions based on control context.
+# Input: 64-dim (signal[32] ++ control[32])
+# Frozen hidden 16x64 → ReLU → learned output 32x16 → sigmoid → gate values
+
+def train(data) do
+    input = slice(data, 0, 64)
+    target = slice(data, 64, 32)
+
+    w_hidden = load_synaptic_frozen("gate.w_hidden", 16, 64)
+    w_out = load_synaptic("gate.w_out", 32, 16)
+
+    h = matmul(input, w_hidden)
+    h = relu(h)
+
+    raw = matmul(h, w_out)
+    gate = sigmoid(raw)
+    gate_c = clamp(gate, 0, 255)
+
+    mastery_update(w_out, h, gate_c, target, [3, 1, 5])
+    gate
+end
+
+def forward(input) do
+    w_hidden = load_synaptic_frozen("gate.w_hidden", 16, 64)
+    w_out = load_synaptic("gate.w_out", 32, 16)
+
+    h = matmul(input, w_hidden)
+    h = relu(h)
+
+    raw = matmul(h, w_out)
+    sigmoid(raw)
+end
+
+def decay() do
+    w_out = load_synaptic("gate.w_out", 32, 16)
+    mastery_decay(w_out)
+end

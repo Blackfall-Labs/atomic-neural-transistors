@@ -1,7 +1,7 @@
 //! UTF-8 Signal Encoding
 //!
 //! Deterministic, structured mapping from each byte (0-255) to a 64-dim
-//! PackedSignal vector. Fixed lookup table — the structure carries semantic
+//! Signal vector. Fixed lookup table — the structure carries semantic
 //! information about character class, not learned features.
 //!
 //! ## Dimension Layout (64 dims)
@@ -17,37 +17,37 @@
 //! | 48-55 | Relational           |
 //! | 56-63 | Reserved (zero)      |
 
-use ternary_signal::PackedSignal;
+use ternary_signal::Signal;
 
 /// Total dimensions per byte encoding.
 pub const ENCODING_DIM: usize = 64;
 
 /// The full lookup table: 256 entries × 64 dims.
 /// Built once at compile time via `const` evaluation.
-static UTF8_SIGNALS: [[PackedSignal; ENCODING_DIM]; 256] = build_table();
+static UTF8_SIGNALS: [[Signal; ENCODING_DIM]; 256] = build_table();
 
 /// Get the 64-dim encoding for a single byte.
 #[inline]
-pub fn encode_byte(byte: u8) -> &'static [PackedSignal; ENCODING_DIM] {
+pub fn encode_byte(byte: u8) -> &'static [Signal; ENCODING_DIM] {
     &UTF8_SIGNALS[byte as usize]
 }
 
 /// Encode a string as a sequence of byte encodings.
-pub fn encode_str(s: &str) -> Vec<&'static [PackedSignal; ENCODING_DIM]> {
+pub fn encode_str(s: &str) -> Vec<&'static [Signal; ENCODING_DIM]> {
     s.as_bytes().iter().map(|&b| encode_byte(b)).collect()
 }
 
 /// Fold a variable-length byte sequence into a single 64-dim pattern signal.
 /// Uses running accumulation with recency weighting: newer bytes have more
-/// influence than older ones. The result is clamped to PackedSignal range.
+/// influence than older ones. The result is clamped to Signal range.
 ///
 /// This produces a fixed-size "fingerprint" suitable for databank storage/query.
-pub fn accumulate(bytes: &[u8]) -> [PackedSignal; ENCODING_DIM] {
+pub fn accumulate(bytes: &[u8]) -> [Signal; ENCODING_DIM] {
     if bytes.is_empty() {
-        return [PackedSignal::ZERO; ENCODING_DIM];
+        return [Signal::ZERO; ENCODING_DIM];
     }
 
-    // Accumulate in i32 space, then quantize back to PackedSignal.
+    // Accumulate in i32 space, then quantize back to Signal.
     // Recency factor: each new byte contributes at full strength while
     // previous accumulation is decayed by 3/4.
     let mut acc = [0i32; ENCODING_DIM];
@@ -62,11 +62,11 @@ pub fn accumulate(bytes: &[u8]) -> [PackedSignal; ENCODING_DIM] {
         }
     }
 
-    // Quantize back to PackedSignal
-    let mut out = [PackedSignal::ZERO; ENCODING_DIM];
+    // Quantize back to Signal
+    let mut out = [Signal::ZERO; ENCODING_DIM];
     for d in 0..ENCODING_DIM {
         if acc[d] != 0 {
-            out[d] = PackedSignal::from_signal(&ternary_signal::Signal::from_current(acc[d]));
+            out[d] = Signal::from_current(acc[d]);
         }
     }
     out
@@ -74,12 +74,12 @@ pub fn accumulate(bytes: &[u8]) -> [PackedSignal; ENCODING_DIM] {
 
 // ─── Table construction ───────────────────────────────────────────────────────
 
-const fn ps(pol: i8, mag: u8, mul: u8) -> PackedSignal {
-    PackedSignal::pack(pol, mag, mul)
+const fn sig(pol: i8, mag: u8, mul: u8) -> Signal {
+    Signal::new_raw(pol, mag, mul)
 }
 
-const fn build_table() -> [[PackedSignal; ENCODING_DIM]; 256] {
-    let mut table = [[PackedSignal::ZERO; ENCODING_DIM]; 256];
+const fn build_table() -> [[Signal; ENCODING_DIM]; 256] {
+    let mut table = [[Signal::ZERO; ENCODING_DIM]; 256];
     let mut i: usize = 0;
     while i < 256 {
         table[i] = encode_byte_const(i as u8);
@@ -90,8 +90,8 @@ const fn build_table() -> [[PackedSignal; ENCODING_DIM]; 256] {
 
 /// Const-evaluable encoding for a single byte.
 /// This is the heart of the encoding — every structural decision lives here.
-const fn encode_byte_const(byte: u8) -> [PackedSignal; ENCODING_DIM] {
-    let mut v = [PackedSignal::ZERO; ENCODING_DIM];
+const fn encode_byte_const(byte: u8) -> [Signal; ENCODING_DIM] {
+    let mut v = [Signal::ZERO; ENCODING_DIM];
 
     // ─── Dims 0-7: Character identity (fingerprint) ───────────────────
     // Spread the byte value across 8 dims using bit decomposition.
@@ -100,76 +100,76 @@ const fn encode_byte_const(byte: u8) -> [PackedSignal; ENCODING_DIM] {
     while bit < 8 {
         let b = (byte >> bit) & 1;
         if b == 1 {
-            v[bit] = ps(1, 200, 1);
+            v[bit] = sig(1, 200, 1);
         } else {
-            v[bit] = ps(-1, 100, 1);
+            v[bit] = sig(-1, 100, 1);
         }
         bit += 1;
     }
 
     // ─── Dims 8-15: Class membership ──────────────────────────────────
     // letter, digit, operator, bracket, whitespace, punctuation, control, high-byte
-    v[8] = if is_letter(byte) { ps(1, 200, 1) } else { ps(-1, 50, 1) };
-    v[9] = if is_digit(byte) { ps(1, 200, 1) } else { ps(-1, 50, 1) };
-    v[10] = if is_operator(byte) { ps(1, 200, 1) } else { ps(-1, 50, 1) };
-    v[11] = if is_bracket(byte) { ps(1, 200, 1) } else { ps(-1, 50, 1) };
-    v[12] = if is_whitespace(byte) { ps(1, 200, 1) } else { ps(-1, 50, 1) };
-    v[13] = if is_punctuation(byte) { ps(1, 200, 1) } else { ps(-1, 50, 1) };
-    v[14] = if byte < 32 || byte == 127 { ps(1, 200, 1) } else { ps(-1, 50, 1) }; // control
-    v[15] = if byte >= 128 { ps(1, 200, 1) } else { ps(-1, 50, 1) }; // high-byte (UTF-8 continuation)
+    v[8] = if is_letter(byte) { sig(1, 200, 1) } else { sig(-1, 50, 1) };
+    v[9] = if is_digit(byte) { sig(1, 200, 1) } else { sig(-1, 50, 1) };
+    v[10] = if is_operator(byte) { sig(1, 200, 1) } else { sig(-1, 50, 1) };
+    v[11] = if is_bracket(byte) { sig(1, 200, 1) } else { sig(-1, 50, 1) };
+    v[12] = if is_whitespace(byte) { sig(1, 200, 1) } else { sig(-1, 50, 1) };
+    v[13] = if is_punctuation(byte) { sig(1, 200, 1) } else { sig(-1, 50, 1) };
+    v[14] = if byte < 32 || byte == 127 { sig(1, 200, 1) } else { sig(-1, 50, 1) }; // control
+    v[15] = if byte >= 128 { sig(1, 200, 1) } else { sig(-1, 50, 1) }; // high-byte (UTF-8 continuation)
 
     // ─── Dims 16-23: Subclass ─────────────────────────────────────────
-    v[16] = if is_uppercase(byte) { ps(1, 200, 1) } else if is_lowercase(byte) { ps(-1, 200, 1) } else { PackedSignal::ZERO };
-    v[17] = if is_open_bracket(byte) { ps(1, 200, 1) } else if is_close_bracket(byte) { ps(-1, 200, 1) } else { PackedSignal::ZERO };
-    v[18] = if is_arithmetic_op(byte) { ps(1, 200, 1) } else { PackedSignal::ZERO };
-    v[19] = if is_comparison_op(byte) { ps(1, 200, 1) } else { PackedSignal::ZERO };
-    v[20] = if is_bitwise_op(byte) { ps(1, 200, 1) } else { PackedSignal::ZERO };
-    v[21] = if is_hex_digit(byte) { ps(1, 150, 1) } else { PackedSignal::ZERO };
-    v[22] = if is_octal_digit(byte) { ps(1, 150, 1) } else { PackedSignal::ZERO };
-    v[23] = if byte == b'_' { ps(1, 200, 1) } else { PackedSignal::ZERO }; // underscore (identifier joiner)
+    v[16] = if is_uppercase(byte) { sig(1, 200, 1) } else if is_lowercase(byte) { sig(-1, 200, 1) } else { Signal::ZERO };
+    v[17] = if is_open_bracket(byte) { sig(1, 200, 1) } else if is_close_bracket(byte) { sig(-1, 200, 1) } else { Signal::ZERO };
+    v[18] = if is_arithmetic_op(byte) { sig(1, 200, 1) } else { Signal::ZERO };
+    v[19] = if is_comparison_op(byte) { sig(1, 200, 1) } else { Signal::ZERO };
+    v[20] = if is_bitwise_op(byte) { sig(1, 200, 1) } else { Signal::ZERO };
+    v[21] = if is_hex_digit(byte) { sig(1, 150, 1) } else { Signal::ZERO };
+    v[22] = if is_octal_digit(byte) { sig(1, 150, 1) } else { Signal::ZERO };
+    v[23] = if byte == b'_' { sig(1, 200, 1) } else { Signal::ZERO }; // underscore (identifier joiner)
 
     // ─── Dims 24-31: Lexical role ─────────────────────────────────────
-    v[24] = if is_keyword_starter(byte) { ps(1, 180, 1) } else { PackedSignal::ZERO };
-    v[25] = if is_identifier_valid(byte) { ps(1, 200, 1) } else { ps(-1, 100, 1) };
-    v[26] = if is_string_delimiter(byte) { ps(1, 200, 1) } else { PackedSignal::ZERO };
-    v[27] = if byte == b'#' { ps(1, 200, 1) } else { PackedSignal::ZERO }; // preprocessor
-    v[28] = if byte == b'\\' { ps(1, 200, 1) } else { PackedSignal::ZERO }; // escape
-    v[29] = if byte == b'0' { ps(1, 180, 1) } else if is_digit(byte) { ps(1, 100, 1) } else { PackedSignal::ZERO }; // numeric literal start
-    v[30] = if byte == b'.' { ps(1, 180, 1) } else { PackedSignal::ZERO }; // member access / float
-    v[31] = if byte == b'@' || byte == b'$' { ps(1, 150, 1) } else { PackedSignal::ZERO }; // sigil
+    v[24] = if is_keyword_starter(byte) { sig(1, 180, 1) } else { Signal::ZERO };
+    v[25] = if is_identifier_valid(byte) { sig(1, 200, 1) } else { sig(-1, 100, 1) };
+    v[26] = if is_string_delimiter(byte) { sig(1, 200, 1) } else { Signal::ZERO };
+    v[27] = if byte == b'#' { sig(1, 200, 1) } else { Signal::ZERO }; // preprocessor
+    v[28] = if byte == b'\\' { sig(1, 200, 1) } else { Signal::ZERO }; // escape
+    v[29] = if byte == b'0' { sig(1, 180, 1) } else if is_digit(byte) { sig(1, 100, 1) } else { Signal::ZERO }; // numeric literal start
+    v[30] = if byte == b'.' { sig(1, 180, 1) } else { Signal::ZERO }; // member access / float
+    v[31] = if byte == b'@' || byte == b'$' { sig(1, 150, 1) } else { Signal::ZERO }; // sigil
 
     // ─── Dims 32-39: Structural weight ────────────────────────────────
-    v[32] = if byte == b'{' { ps(1, 200, 1) } else { PackedSignal::ZERO }; // scope opener
-    v[33] = if byte == b'}' { ps(1, 200, 1) } else { PackedSignal::ZERO }; // scope closer
-    v[34] = if byte == b';' { ps(1, 200, 1) } else { PackedSignal::ZERO }; // statement terminator
-    v[35] = if byte == b',' { ps(1, 200, 1) } else { PackedSignal::ZERO }; // separator
-    v[36] = if byte == b':' { ps(1, 180, 1) } else { PackedSignal::ZERO }; // label / ternary / slice
-    v[37] = if byte == b'\n' { ps(1, 200, 1) } else { PackedSignal::ZERO }; // line break
-    v[38] = if byte == b'=' { ps(1, 200, 1) } else { PackedSignal::ZERO }; // assignment
-    v[39] = if byte == b'*' || byte == b'&' { ps(1, 180, 1) } else { PackedSignal::ZERO }; // pointer/reference
+    v[32] = if byte == b'{' { sig(1, 200, 1) } else { Signal::ZERO }; // scope opener
+    v[33] = if byte == b'}' { sig(1, 200, 1) } else { Signal::ZERO }; // scope closer
+    v[34] = if byte == b';' { sig(1, 200, 1) } else { Signal::ZERO }; // statement terminator
+    v[35] = if byte == b',' { sig(1, 200, 1) } else { Signal::ZERO }; // separator
+    v[36] = if byte == b':' { sig(1, 180, 1) } else { Signal::ZERO }; // label / ternary / slice
+    v[37] = if byte == b'\n' { sig(1, 200, 1) } else { Signal::ZERO }; // line break
+    v[38] = if byte == b'=' { sig(1, 200, 1) } else { Signal::ZERO }; // assignment
+    v[39] = if byte == b'*' || byte == b'&' { sig(1, 180, 1) } else { Signal::ZERO }; // pointer/reference
 
     // ─── Dims 40-47: Frequency / commonality ──────────────────────────
     // How common this byte is in source code (approximate tiers).
     let freq = code_frequency_tier(byte);
-    v[40] = if freq >= 4 { ps(1, 200, 1) } else { PackedSignal::ZERO }; // very common
-    v[41] = if freq >= 3 { ps(1, 160, 1) } else { PackedSignal::ZERO }; // common
-    v[42] = if freq >= 2 { ps(1, 120, 1) } else { PackedSignal::ZERO }; // moderate
-    v[43] = if freq >= 1 { ps(1, 80, 1) } else { PackedSignal::ZERO };  // uncommon
-    v[44] = if is_identifier_valid(byte) { ps(1, 180, 1) } else { PackedSignal::ZERO }; // expected in identifiers
-    v[45] = if is_digit(byte) || byte == b'x' || byte == b'X' { ps(1, 150, 1) } else { PackedSignal::ZERO }; // expected in numeric literals
-    v[46] = if byte == b' ' || byte == b'\t' { ps(1, 200, 1) } else { PackedSignal::ZERO }; // indentation chars
-    v[47] = if byte == b'/' || byte == b'*' { ps(1, 150, 1) } else { PackedSignal::ZERO }; // comment chars
+    v[40] = if freq >= 4 { sig(1, 200, 1) } else { Signal::ZERO }; // very common
+    v[41] = if freq >= 3 { sig(1, 160, 1) } else { Signal::ZERO }; // common
+    v[42] = if freq >= 2 { sig(1, 120, 1) } else { Signal::ZERO }; // moderate
+    v[43] = if freq >= 1 { sig(1, 80, 1) } else { Signal::ZERO };  // uncommon
+    v[44] = if is_identifier_valid(byte) { sig(1, 180, 1) } else { Signal::ZERO }; // expected in identifiers
+    v[45] = if is_digit(byte) || byte == b'x' || byte == b'X' { sig(1, 150, 1) } else { Signal::ZERO }; // expected in numeric literals
+    v[46] = if byte == b' ' || byte == b'\t' { sig(1, 200, 1) } else { Signal::ZERO }; // indentation chars
+    v[47] = if byte == b'/' || byte == b'*' { sig(1, 150, 1) } else { Signal::ZERO }; // comment chars
 
     // ─── Dims 48-55: Relational ───────────────────────────────────────
     // Encodes pairing / association relationships.
     v[48] = bracket_pair_signal(byte);  // bracket pairing identity
-    v[49] = if byte == b'"' || byte == b'\'' { ps(1, 200, 1) } else { PackedSignal::ZERO }; // string pair
-    v[50] = if is_letter(byte) || byte == b'_' || is_digit(byte) { ps(1, 180, 1) } else { PackedSignal::ZERO }; // identifier cohort
-    v[51] = if byte == b'+' || byte == b'-' { ps(1, 150, 1) } else if byte == b'*' || byte == b'/' { ps(-1, 150, 1) } else { PackedSignal::ZERO }; // arithmetic pairing
-    v[52] = if byte == b'<' || byte == b'>' { ps(1, 180, 1) } else { PackedSignal::ZERO }; // angle pair / comparison
-    v[53] = if byte == b'&' || byte == b'|' { ps(1, 180, 1) } else { PackedSignal::ZERO }; // logical/bitwise pair
-    v[54] = if byte == b'!' || byte == b'?' { ps(1, 150, 1) } else { PackedSignal::ZERO }; // assertion/query
-    v[55] = if byte == b'-' && false { PackedSignal::ZERO } else if byte == b'>' { ps(1, 200, 1) } else { PackedSignal::ZERO }; // arrow component (>)
+    v[49] = if byte == b'"' || byte == b'\'' { sig(1, 200, 1) } else { Signal::ZERO }; // string pair
+    v[50] = if is_letter(byte) || byte == b'_' || is_digit(byte) { sig(1, 180, 1) } else { Signal::ZERO }; // identifier cohort
+    v[51] = if byte == b'+' || byte == b'-' { sig(1, 150, 1) } else if byte == b'*' || byte == b'/' { sig(-1, 150, 1) } else { Signal::ZERO }; // arithmetic pairing
+    v[52] = if byte == b'<' || byte == b'>' { sig(1, 180, 1) } else { Signal::ZERO }; // angle pair / comparison
+    v[53] = if byte == b'&' || byte == b'|' { sig(1, 180, 1) } else { Signal::ZERO }; // logical/bitwise pair
+    v[54] = if byte == b'!' || byte == b'?' { sig(1, 150, 1) } else { Signal::ZERO }; // assertion/query
+    v[55] = if byte == b'-' && false { Signal::ZERO } else if byte == b'>' { sig(1, 200, 1) } else { Signal::ZERO }; // arrow component (>)
 
     // ─── Dims 56-63: Reserved (zero-filled) ──────────────────────────
     // Already initialized to ZERO.
@@ -272,17 +272,17 @@ const fn code_frequency_tier(b: u8) -> u8 {
 
 /// Bracket pairing signal — matched pairs get the same magnitude but
 /// openers are excitatory and closers are inhibitory.
-const fn bracket_pair_signal(b: u8) -> PackedSignal {
+const fn bracket_pair_signal(b: u8) -> Signal {
     match b {
-        b'(' => ps(1, 200, 1),
-        b')' => ps(-1, 200, 1),
-        b'[' => ps(1, 180, 1),
-        b']' => ps(-1, 180, 1),
-        b'{' => ps(1, 160, 1),
-        b'}' => ps(-1, 160, 1),
-        b'<' => ps(1, 140, 1),
-        b'>' => ps(-1, 140, 1),
-        _ => PackedSignal::ZERO,
+        b'(' => sig(1, 200, 1),
+        b')' => sig(-1, 200, 1),
+        b'[' => sig(1, 180, 1),
+        b']' => sig(-1, 180, 1),
+        b'{' => sig(1, 160, 1),
+        b'}' => sig(-1, 160, 1),
+        b'<' => sig(1, 140, 1),
+        b'>' => sig(-1, 140, 1),
+        _ => Signal::ZERO,
     }
 }
 
@@ -319,9 +319,9 @@ mod tests {
         let a = encode_byte(b'a');
         let b_enc = encode_byte(b'b');
         // Both are letters: dim 8 should be the same (excitatory)
-        assert_eq!(a[8].polarity(), b_enc[8].polarity(), "'a' and 'b' should share letter class");
+        assert_eq!(a[8].polarity, b_enc[8].polarity, "'a' and 'b' should share letter class");
         // Both are lowercase: dim 16 should be inhibitory (lowercase branch)
-        assert_eq!(a[16].polarity(), b_enc[16].polarity(), "'a' and 'b' should share lowercase subclass");
+        assert_eq!(a[16].polarity, b_enc[16].polarity, "'a' and 'b' should share lowercase subclass");
     }
 
     #[test]
@@ -329,18 +329,18 @@ mod tests {
         let a = encode_byte(b'a');
         let brace = encode_byte(b'{');
         // Dim 8: letter class — 'a' excitatory, '{' inhibitory
-        assert_eq!(a[8].polarity(), 1);
-        assert_eq!(brace[8].polarity(), -1);
+        assert_eq!(a[8].polarity, 1);
+        assert_eq!(brace[8].polarity, -1);
         // Dim 11: bracket class — '{' excitatory, 'a' inhibitory
-        assert_eq!(brace[11].polarity(), 1);
-        assert_eq!(a[11].polarity(), -1);
+        assert_eq!(brace[11].polarity, 1);
+        assert_eq!(a[11].polarity, -1);
     }
 
     #[test]
     fn digit_class_correct() {
         let five = encode_byte(b'5');
-        assert_eq!(five[9].polarity(), 1, "'5' should be digit class");
-        assert_eq!(five[8].polarity(), -1, "'5' should not be letter class");
+        assert_eq!(five[9].polarity, 1, "'5' should be digit class");
+        assert_eq!(five[8].polarity, -1, "'5' should not be letter class");
     }
 
     #[test]
@@ -370,7 +370,7 @@ mod tests {
     fn accumulate_empty_is_zero() {
         let empty = accumulate(b"");
         for d in 0..ENCODING_DIM {
-            assert_eq!(empty[d], PackedSignal::ZERO, "empty accumulation should be all zero");
+            assert_eq!(empty[d], Signal::ZERO, "empty accumulation should be all zero");
         }
     }
 
@@ -379,17 +379,17 @@ mod tests {
         let open = encode_byte(b'(');
         let close = encode_byte(b')');
         // Dim 48: bracket pair — same magnitude, opposite polarity
-        assert_eq!(open[48].polarity(), 1, "'(' should be excitatory in pair dim");
-        assert_eq!(close[48].polarity(), -1, "')' should be inhibitory in pair dim");
+        assert_eq!(open[48].polarity, 1, "'(' should be excitatory in pair dim");
+        assert_eq!(close[48].polarity, -1, "')' should be inhibitory in pair dim");
     }
 
     #[test]
     fn structural_dims() {
         let brace = encode_byte(b'{');
-        assert_eq!(brace[32].polarity(), 1, "'{{' should activate scope opener dim");
+        assert_eq!(brace[32].polarity, 1, "'{{' should activate scope opener dim");
 
         let semi = encode_byte(b';');
-        assert_eq!(semi[34].polarity(), 1, "';' should activate terminator dim");
+        assert_eq!(semi[34].polarity, 1, "';' should activate terminator dim");
     }
 
     #[test]
@@ -399,7 +399,7 @@ mod tests {
             let enc = encode_byte(byte);
             let mut has_nonzero = false;
             for d in 0..ENCODING_DIM {
-                if enc[d] != PackedSignal::ZERO {
+                if enc[d] != Signal::ZERO {
                     has_nonzero = true;
                     break;
                 }
