@@ -253,8 +253,7 @@ where
     F: FnOnce(&mut AntRuntime) -> Result<R, RuneError>,
 {
     let span = ctx.span;
-    let arc = ctx.host.downcast_mut::<Arc<Mutex<AntRuntime>>>()
-        .ok_or_else(|| RuneError::type_error("ANT runtime not available", Some(span)))?;
+    let arc = ctx.runtime_mut::<Arc<Mutex<AntRuntime>>>()?;
     let mut guard = arc.lock().map_err(|_| RuneError::type_error("runtime lock poisoned", Some(span)))?;
     f(&mut guard)
 }
