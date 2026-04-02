@@ -1168,7 +1168,11 @@ impl Verb for ThermalMasteryUpdateVerb {
         let input = require_array(args, 1, "thermal_mastery_update", span)?;
         let output = require_array(args, 2, "thermal_mastery_update", span)?;
         let target = require_array(args, 3, "thermal_mastery_update", span)?;
-        let correct = require_int(args, 4, "thermal_mastery_update", span)? != 0;
+        let correct = match args.get(4) {
+            Some(Value::Bool(b)) => *b,
+            Some(Value::Integer(n)) => *n != 0,
+            _ => return Err(RuneError::argument("thermal_mastery_update requires bool or integer at position 4", Some(span))),
+        };
 
         let config = if let Some(Value::Array(arr)) = args.get(5) {
             ThermalMasteryConfig {
