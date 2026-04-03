@@ -23,13 +23,15 @@ Per-Layer Header (8 bytes):
   cols:       u16 (LE)
   reserved:   u32        — (0)
 
-Per Synaptic Strength (8 bytes):
+Per Synaptic Strength (12 bytes):
   polarity:    i8         — -1 (inhibitory), 0 (silent), +1 (excitatory)
   magnitude:   u8         — base intensity (0-255)
   multiplier:  u8         — contextual scaling (0-255)
   temperature: u8         — 255=HOT → 0=COLD
   hits:        u16 (LE)   — reinforcement count
   pressure:    i16 (LE)   — accumulated mastery pressure
+  streak:      u16 (LE)   — consecutive correct participations (resets on miss)
+  confidence:  u16 (LE)   — accumulated prediction margin from correct participations
 ```
 
 ## Size Estimates

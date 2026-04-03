@@ -32,6 +32,11 @@ pub struct ThermalWeight {
     pub hits: u16,
     /// Accumulated mastery pressure (signed).
     pub pressure: i16,
+    /// Consecutive correct participations without error. Resets on any incorrect.
+    pub streak: u16,
+    /// Confidence accumulator: sum of prediction margins during correct participations.
+    /// Higher = this strength consistently contributes to high-margin correct outputs.
+    pub confidence: u16,
 }
 
 impl ThermalWeight {
@@ -43,6 +48,8 @@ impl ThermalWeight {
         temperature: 255,
         hits: 0,
         pressure: 0,
+        streak: 0,
+        confidence: 0,
     };
 
     /// Create from a Signal at full temperature.
@@ -54,6 +61,8 @@ impl ThermalWeight {
             temperature: 255,
             hits: 0,
             pressure: 0,
+            streak: 0,
+            confidence: 0,
         }
     }
 
@@ -66,6 +75,8 @@ impl ThermalWeight {
             temperature: 255,
             hits: 0,
             pressure: 0,
+            streak: 0,
+            confidence: 0,
         }
     }
 
@@ -104,23 +115,59 @@ impl ThermalWeight {
         else { 0 } // COLD = no transitions
     }
 
-    /// Record a correct participation. Cools the strength.
-    pub fn hit(&mut self, cooling_rate: u16) {
+    /// Record a correct participation with prediction margin.
+    /// Cooling is performance-conditioned:
+    ///   - Streak-accelerated: longer streaks cool faster
+    ///   - Margin-weighted: high-margin correct predictions cool faster
+    ///   - Confidence accumulates over time
+    pub fn hit(&mut self, cooling_rate: u16, margin: u16) {
         self.hits = self.hits.saturating_add(1);
-        if cooling_rate > 0 && self.hits % cooling_rate == 0 && self.temperature > 0 {
-            self.temperature = self.temperature.saturating_sub(1);
+        self.streak = self.streak.saturating_add(1);
+        self.confidence = self.confidence.saturating_add(margin.min(255));
+
+        if cooling_rate == 0 || self.temperature == 0 {
+            return;
         }
+
+        // Base cooling: hits / cooling_rate
+        let base_cool = self.hits / cooling_rate;
+
+        // Streak bonus: every 50 consecutive correct, extra 1 degree cooling
+        let streak_bonus = self.streak / 50;
+
+        // Confidence bonus: high accumulated confidence cools faster
+        let confidence_bonus = self.confidence / (cooling_rate * 4);
+
+        let total_cool = base_cool + streak_bonus + confidence_bonus;
+
+        // Temperature can only decrease from initial 255, so compute target
+        let target_temp = 255u16.saturating_sub(total_cool);
+        if (target_temp as u8) < self.temperature {
+            self.temperature = target_temp as u8;
+        }
+    }
+
+    /// Record an incorrect participation. Breaks streak.
+    /// Confidence decays slowly — earned confidence is hard to lose.
+    pub fn miss(&mut self) {
+        self.streak = 0;
+        // Gentle decay: lose 1/16th of confidence per miss.
+        // A strength with 10000 confidence needs 160+ consecutive misses to halve.
+        self.confidence = self.confidence.saturating_sub(self.confidence / 16);
     }
 
     /// Warm up (on sustained errors despite being cool/cold).
     pub fn warm(&mut self, amount: u8) {
         self.temperature = self.temperature.saturating_add(amount);
+        self.streak = 0;
     }
 
-    /// Serialize to 8 bytes (v3 format).
-    pub fn to_bytes(&self) -> [u8; 8] {
+    /// Serialize to 12 bytes (v3 format).
+    pub fn to_bytes(&self) -> [u8; 12] {
         let hits = self.hits.to_le_bytes();
         let pressure = self.pressure.to_le_bytes();
+        let streak = self.streak.to_le_bytes();
+        let confidence = self.confidence.to_le_bytes();
         [
             self.polarity.as_i8() as u8,
             self.magnitude,
@@ -128,11 +175,13 @@ impl ThermalWeight {
             self.temperature,
             hits[0], hits[1],
             pressure[0], pressure[1],
+            streak[0], streak[1],
+            confidence[0], confidence[1],
         ]
     }
 
-    /// Deserialize from 8 bytes (v3 format).
-    pub fn from_bytes(b: &[u8; 8]) -> Self {
+    /// Deserialize from 12 bytes (v3 format).
+    pub fn from_bytes(b: &[u8; 12]) -> Self {
         Self {
             polarity: Polarity::from_i8_clamped(b[0] as i8),
             magnitude: b[1],
@@ -140,6 +189,8 @@ impl ThermalWeight {
             temperature: b[3],
             hits: u16::from_le_bytes([b[4], b[5]]),
             pressure: i16::from_le_bytes([b[6], b[7]]),
+            streak: u16::from_le_bytes([b[8], b[9]]),
+            confidence: u16::from_le_bytes([b[10], b[11]]),
         }
     }
 }
@@ -187,7 +238,7 @@ impl Default for ThermalMasteryConfig {
 }
 
 const MAGIC_V3: [u8; 4] = *b"ANT\x03";
-const BYTES_PER_WEIGHT: usize = 8;
+const BYTES_PER_WEIGHT: usize = 12;
 const LAYER_HEADER: usize = 8;
 const FILE_HEADER: usize = 16;
 
@@ -226,6 +277,59 @@ impl ThermalWeightMatrix {
     /// Get mutable strength at (row, col).
     pub fn get_mut(&mut self, row: usize, col: usize) -> &mut ThermalWeight {
         &mut self.data[row * self.cols + col]
+    }
+
+    /// Imprint an input pattern into a SPECIFIC row of the weight matrix.
+    ///
+    /// Each call additively absorbs the input signal into the specified row.
+    /// Use different rows for different samples to create hidden neuron diversity.
+    ///
+    /// Imprinting is direct write — no pressure, no thresholds, no mastery.
+    /// Weights stay HOT after imprinting so mastery can refine them.
+    pub fn imprint_row(&mut self, row: usize, input: &[Signal]) {
+        assert_eq!(input.len(), self.cols, "imprint input dimension mismatch");
+        assert!(row < self.rows, "imprint row out of bounds");
+        for col in 0..self.cols {
+            let idx = row * self.cols + col;
+            let tw = &mut self.data[idx];
+            let input_current = input[col].current();
+            let existing = tw.current();
+            let combined = existing as i64 + input_current as i64;
+            let new_signal = Signal::from_current(combined.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+            tw.polarity = Polarity::from_i8_clamped(new_signal.polarity);
+            tw.magnitude = new_signal.magnitude;
+            tw.multiplier = new_signal.multiplier;
+        }
+    }
+
+    /// Imprint an input pattern into ALL rows (broadcast).
+    pub fn imprint(&mut self, input: &[Signal]) {
+        for row in 0..self.rows {
+            self.imprint_row(row, input);
+        }
+    }
+
+    /// Normalize a specific row by dividing by count.
+    pub fn normalize_row(&mut self, row: usize, count: usize) {
+        if count == 0 { return; }
+        assert!(row < self.rows);
+        for col in 0..self.cols {
+            let idx = row * self.cols + col;
+            let tw = &mut self.data[idx];
+            let avg = tw.current() as i64 / count as i64;
+            let sig = Signal::from_current(avg as i32);
+            tw.polarity = Polarity::from_i8_clamped(sig.polarity);
+            tw.magnitude = sig.magnitude;
+            tw.multiplier = sig.multiplier;
+        }
+    }
+
+    /// Normalize all imprinted weights by dividing by count.
+    pub fn normalize_imprint(&mut self, count: usize) {
+        if count == 0 { return; }
+        for row in 0..self.rows {
+            self.normalize_row(row, count);
+        }
     }
 
     /// Matmul using only the signal values (temperature doesn't affect computation).
@@ -336,9 +440,10 @@ impl ThermalWeightMatrix {
             let mut data = Vec::with_capacity(n_weights);
             for i in 0..n_weights {
                 let base = offset + i * BYTES_PER_WEIGHT;
-                let b: [u8; 8] = [
+                let b: [u8; 12] = [
                     body[base], body[base + 1], body[base + 2], body[base + 3],
                     body[base + 4], body[base + 5], body[base + 6], body[base + 7],
+                    body[base + 8], body[base + 9], body[base + 10], body[base + 11],
                 ];
                 data.push(ThermalWeight::from_bytes(&b));
             }
@@ -376,9 +481,10 @@ impl ThermalWeightMatrix {
         let mut data = Vec::with_capacity(n_weights);
         for i in 0..n_weights {
             let base = weight_start + i * BYTES_PER_WEIGHT;
-            let b: [u8; 8] = [
+            let b: [u8; 12] = [
                 body[base], body[base + 1], body[base + 2], body[base + 3],
                 body[base + 4], body[base + 5], body[base + 6], body[base + 7],
+                body[base + 8], body[base + 9], body[base + 10], body[base + 11],
             ];
             data.push(ThermalWeight::from_bytes(&b));
         }
@@ -406,10 +512,10 @@ mod tests {
     fn thermal_weight_cooling() {
         let mut tw = ThermalWeight::ZERO_HOT;
         for _ in 0..100 {
-            tw.hit(100);
+            tw.hit(100, 50); // margin=50 per hit
         }
         assert_eq!(tw.hits, 100);
-        assert_eq!(tw.temperature, 254);
+        assert!(tw.temperature < 255, "should cool after 100 hits");
     }
 
     #[test]
@@ -448,6 +554,8 @@ mod tests {
         assert_eq!(tw.temperature, tw2.temperature);
         assert_eq!(tw.hits, tw2.hits);
         assert_eq!(tw.pressure, tw2.pressure);
+        assert_eq!(tw.streak, tw2.streak);
+        assert_eq!(tw.confidence, tw2.confidence);
     }
 
     #[test]

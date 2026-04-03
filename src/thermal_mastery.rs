@@ -58,14 +58,39 @@ impl ThermalMasteryState {
             .max(1);
         let activity_threshold = max_input / 4; // top 25%
 
-        // Pass 1: Hit counting on correct detections (BEFORE error loop).
-        if correct {
-            for j in 0..weights.cols {
-                let input_abs = input[j].current().unsigned_abs();
-                if input_abs > activity_threshold {
-                    for i in 0..weights.rows {
-                        let w_idx = i * weights.cols + j;
-                        weights.data[w_idx].hit(self.config.cooling_rate);
+        // Compute prediction margin: difference between correct class output
+        // and highest incorrect class output. Higher margin = more confident.
+        let mut max_correct: i64 = 0;
+        let mut max_incorrect: i64 = 0;
+        let mut has_correct = false;
+        let mut has_incorrect = false;
+        for i in 0..weights.rows {
+            let out_val = output[i].current() as i64;
+            let tgt_val = target[i].current() as i64;
+            if tgt_val > 0 {
+                if !has_correct || out_val > max_correct { max_correct = out_val; }
+                has_correct = true;
+            } else {
+                if !has_incorrect || out_val > max_incorrect { max_incorrect = out_val; }
+                has_incorrect = true;
+            }
+        }
+        let margin = if has_correct && has_incorrect {
+            (max_correct - max_incorrect).max(0) as u16
+        } else {
+            0
+        };
+
+        // Pass 1: Hit/miss counting — performance-conditioned cooling.
+        for j in 0..weights.cols {
+            let input_abs = input[j].current().unsigned_abs();
+            if input_abs > activity_threshold {
+                for i in 0..weights.rows {
+                    let w_idx = i * weights.cols + j;
+                    if correct {
+                        weights.data[w_idx].hit(self.config.cooling_rate, margin);
+                    } else {
+                        weights.data[w_idx].miss();
                     }
                 }
             }

@@ -154,6 +154,12 @@ impl AntRuntime {
         self.weights.get_mut(&handle)
     }
 
+    /// Look up a thermal weight matrix by its synaptic key.
+    pub fn thermal_weights_by_key(&self, key: &str) -> Option<&ThermalWeightMatrix> {
+        let handle = self.synaptic_keys.get(key)?;
+        self.thermal_weights.get(handle)
+    }
+
     /// Get or create a mastery state for a synaptic key.
     pub fn ensure_mastery_for_key(&mut self, key: &str) -> Option<(&mut MasteryState, &mut WeightMatrix)> {
         let handle = *self.synaptic_keys.get(key)?;
@@ -225,6 +231,9 @@ impl AntMlModule {
                 Box::new(ThermalMasteryUpdateVerb),
                 Box::new(ThermalDecayVerb),
                 Box::new(ThermalSummaryVerb),
+                Box::new(ThermalImprintVerb),
+                Box::new(ThermalNormalizeImprintVerb),
+                Box::new(ThermalReadVerb),
             ],
         }
     }
@@ -1240,6 +1249,100 @@ impl Verb for ThermalSummaryVerb {
                 Value::Integer(c as i64),
                 Value::Integer(d as i64),
             ])))
+        })
+    }
+}
+
+/// thermal_imprint(w_handle, input, [row]) → Nil
+/// Additively absorb an input pattern into a ThermalWeightMatrix.
+/// If row is provided, imprints into that specific row only.
+/// If omitted, broadcasts to all rows.
+/// No pressure, no thresholds — direct write.
+struct ThermalImprintVerb;
+impl Verb for ThermalImprintVerb {
+    fn name(&self) -> &str { "thermal_imprint" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let handle = require_handle(args, 0, "thermal_imprint", HANDLE_THERMAL_MATRIX, span)?;
+        let input = require_array(args, 1, "thermal_imprint", span)?;
+        let row = if args.len() > 2 {
+            Some(require_int(args, 2, "thermal_imprint", span)? as usize)
+        } else {
+            None
+        };
+
+        with_runtime(ctx, |rt| {
+            let twm = rt.thermal_weights.get_mut(&handle)
+                .ok_or_else(|| RuneError::argument("thermal_imprint: invalid handle", Some(span)))?;
+            if let Some(r) = row {
+                twm.imprint_row(r, &input);
+            } else {
+                twm.imprint(&input);
+            }
+            Ok(Value::Nil)
+        })
+    }
+}
+
+/// thermal_normalize_imprint(w_handle, count, [row]) → Nil
+/// Divide imprinted weights by count. If row given, normalize that row only.
+struct ThermalNormalizeImprintVerb;
+impl Verb for ThermalNormalizeImprintVerb {
+    fn name(&self) -> &str { "thermal_normalize_imprint" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let handle = require_handle(args, 0, "thermal_normalize_imprint", HANDLE_THERMAL_MATRIX, span)?;
+        let count = require_int(args, 1, "thermal_normalize_imprint", span)? as usize;
+        let row = if args.len() > 2 {
+            Some(require_int(args, 2, "thermal_normalize_imprint", span)? as usize)
+        } else {
+            None
+        };
+
+        with_runtime(ctx, |rt| {
+            let twm = rt.thermal_weights.get_mut(&handle)
+                .ok_or_else(|| RuneError::argument("thermal_normalize_imprint: invalid handle", Some(span)))?;
+            if let Some(r) = row {
+                twm.normalize_row(r, count);
+            } else {
+                twm.normalize_imprint(count);
+            }
+            Ok(Value::Nil)
+        })
+    }
+}
+
+/// thermal_read(w_handle, [row]) → Array
+/// Read the signal values from a ThermalWeightMatrix as an array of current values.
+/// If row is given, reads that row only. Otherwise reads row 0.
+/// Each value preserves the full s = p × m × k computation.
+struct ThermalReadVerb;
+impl Verb for ThermalReadVerb {
+    fn name(&self) -> &str { "thermal_read" }
+    fn call(&self, args: &[Value], ctx: &mut EvalContext) -> VerbResult {
+        let span = ctx.span;
+        let handle = require_handle(args, 0, "thermal_read", HANDLE_THERMAL_MATRIX, span)?;
+        let row = if args.len() > 1 {
+            require_int(args, 1, "thermal_read", span)? as usize
+        } else {
+            0
+        };
+
+        with_runtime(ctx, |rt| {
+            let twm = rt.thermal_weights.get(&handle)
+                .ok_or_else(|| RuneError::argument("thermal_read: invalid handle", Some(span)))?;
+            if row >= twm.rows {
+                return Err(RuneError::argument(
+                    format!("thermal_read: row {} out of bounds (rows={})", row, twm.rows),
+                    Some(span),
+                ));
+            }
+            let start = row * twm.cols;
+            let end = start + twm.cols;
+            let values: Vec<Value> = twm.data[start..end].iter()
+                .map(|tw| Value::Integer(tw.current() as i64))
+                .collect();
+            Ok(Value::Array(Arc::new(values)))
         })
     }
 }
