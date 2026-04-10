@@ -140,6 +140,83 @@ impl ThermalMasteryState {
         }
     }
 
+    /// Selective update: only touch the correct class row and (if wrong) the predicted class row.
+    ///
+    /// This avoids the 9× negative pressure problem of updating all 10 rows per sample.
+    /// The correct class is strengthened, the wrong prediction is weakened. Other rows are untouched.
+    pub fn update_selective(
+        &mut self,
+        weights: &mut ThermalWeightMatrix,
+        input: &[Signal],
+        label: usize,
+        predicted: usize,
+        correct: bool,
+    ) {
+        assert_eq!(input.len(), weights.cols);
+        self.steps += 1;
+
+        let max_input = input.iter()
+            .map(|s| s.current().unsigned_abs())
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let activity_threshold = max_input / 4;
+
+        // Which rows to update and in which direction
+        let rows: Vec<(usize, i32)> = if correct {
+            vec![(label, 1)] // strengthen correct
+        } else {
+            vec![(label, 1), (predicted, -1)] // strengthen correct, weaken wrong
+        };
+
+        // Hit/miss on participating weights (only touched rows)
+        for j in 0..weights.cols {
+            let input_abs = input[j].current().unsigned_abs();
+            if input_abs <= activity_threshold { continue; }
+            for &(row, _) in &rows {
+                if row >= weights.rows { continue; }
+                let w_idx = row * weights.cols + j;
+                if correct {
+                    weights.data[w_idx].hit(self.config.cooling_rate, 0);
+                } else {
+                    weights.data[w_idx].miss();
+                }
+            }
+        }
+
+        // Pressure accumulation on touched rows only
+        for &(row, direction) in &rows {
+            if row >= weights.rows { continue; }
+            for j in 0..weights.cols {
+                let w_idx = row * weights.cols + j;
+                let tw = &weights.data[w_idx];
+
+                if tw.pressure_multiplier() == 0 { continue; }
+
+                let input_abs = input[j].current().unsigned_abs();
+                let input_sign = (input[j].current() as i64).signum() as i32;
+
+                if input_abs <= activity_threshold { continue; }
+
+                let activity_strength = ((input_abs - activity_threshold) as i64 * 15
+                    / max_input as i64).max(1) as i32;
+
+                let pressure_delta = direction * input_sign * activity_strength;
+                let tw = &mut weights.data[w_idx];
+                tw.pressure = tw.pressure.saturating_add(pressure_delta as i16);
+
+                let effective_threshold = self.config.pressure_threshold as i16
+                    * tw.pressure_multiplier() as i16;
+
+                if tw.pressure.abs() >= effective_threshold {
+                    let needed = tw.pressure.signum() as i32;
+                    apply_transition(tw, needed, &mut self.transitions);
+                    tw.pressure = 0;
+                }
+            }
+        }
+    }
+
     /// Decay pressure on all strengths. Call once per cycle.
     pub fn decay(&self, weights: &mut ThermalWeightMatrix) {
         for tw in &mut weights.data {

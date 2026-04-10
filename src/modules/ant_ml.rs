@@ -137,6 +137,11 @@ impl AntRuntime {
         self.mastery.get(&handle)
     }
 
+    /// Get thermal mastery state for a handle.
+    pub fn get_thermal_mastery(&self, handle: u64) -> Option<&ThermalMasteryState> {
+        self.thermal_mastery.get(&handle)
+    }
+
     /// List all synaptic keys and their handle IDs.
     pub fn synaptic_key_handles(&self) -> &HashMap<String, u64> {
         &self.synaptic_keys
